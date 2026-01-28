@@ -278,6 +278,9 @@ EOF
 install_core_packages_mandatory() {
   log "📦 Installing core tools and language build dependencies (mandatory)..."
 
+  # Silence detached HEAD advice (common during automated installs)
+  git config --global advice.detachedHead false
+
   ensure_github_cli_repo
 
   # Stage 0 already installed: ca-certificates curl wget gnupg lsb-release
@@ -482,7 +485,7 @@ install_rust() {
 }
 
 install_htmlq() {
-  if need_cmd htmlq; then
+  if need_cmd; then
     log "htmlq already installed: $(htmlq --version 2>/dev/null || true)"
     return 0
   fi
@@ -491,8 +494,8 @@ install_htmlq() {
     die "htmlq requires Rust (cargo). Please install Rust (rustup) first."
   fi
 
-  log "Installing htmlq via cargo"
-  cargo install htmlq
+  log "Installing via cargo"
+  cargo install
 }
 
 
@@ -576,6 +579,216 @@ Core packages:
 EOF
 }
 
+
+############################################
+# Agent tooling (optional, grouped)
+############################################
+
+latest_python_stable() {
+  # Picks the latest stable CPython from asdf list-all output, ignoring prereleases.
+  # Example lines include: 3.12.7, 3.13.0, etc. We exclude anything with letters.
+  asdf list all python 2>/dev/null \
+    | awk '/^[0-9]+\.[0-9]+\.[0-9]+$/{print}' \
+    | tail -n 1
+}
+
+install_uv() {
+  if need_cmd uv; then
+    log "uv already installed: $(uv --version 2>/dev/null || true)"
+    return 0
+  fi
+  log "Installing uv (Astral)"
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  # uv installs to ~/.local/bin by default
+  export PATH="$HOME/.local/bin:$PATH"
+}
+
+install_bun() {
+  if need_cmd bun; then
+    log "bun already installed: $(bun --version 2>/dev/null || true)"
+    return 0
+  fi
+  log "Installing bun"
+  curl -fsSL https://bun.sh/install | bash
+  export PATH="$HOME/.bun/bin:$PATH"
+}
+
+install_python_asdf() {
+  install_asdf
+  asdf_source
+
+  asdf plugin add python >/dev/null 2>&1 || true
+
+  local py_ver
+  py_ver="$(latest_python_stable || true)"
+  if [[ -z "${py_ver}" ]]; then
+    warn "Could not determine latest Python version from asdf. Skipping Python install."
+    return 0
+  fi
+
+  if ! asdf list python 2>/dev/null | grep -q "${py_ver}"; then
+    log "Installing Python ${py_ver} via asdf"
+    asdf install python "${py_ver}"
+  else
+    log "Python ${py_ver} already installed via asdf"
+  fi
+
+  # Set as user default (writes to ~/.tool-versions)
+  asdf set -u python "${py_ver}"
+  asdf reshim python
+}
+
+install_python_agent_libs() {
+  install_uv
+
+  local py_bin=""
+  if need_cmd python; then
+    py_bin="$(command -v python)"
+  fi
+
+  mkdir -p "$(dirname "$PY_VENV_DIR")"
+  if [[ ! -d "$PY_VENV_DIR" ]]; then
+    log "Creating agent venv: $PY_VENV_DIR"
+    uv venv "$PY_VENV_DIR"
+  else
+    log "Agent venv already exists: $PY_VENV_DIR"
+  fi
+
+  log "Installing Python agent tooling into venv (uv pip)"
+  uv pip install --python "$PY_VENV_DIR/bin/python" \
+    langchain-openai llama-index crewai autogen aider-chat playwright \
+    beautifulsoup4 duckduckgo-search
+}
+
+install_node_agent_tooling() {
+  # Assumes node is installed. Installs CLIs used for agent workflows.
+  if ! need_cmd npm; then
+    warn "npm not found; skipping Node agent tooling."
+    return 0
+  fi
+
+  log "Installing global Node agent CLIs (best effort)"
+  # Use npm -g for compatibility; corepack/pnpm remains available.
+  sudo npm install -g \
+    moltbot@latest \
+    molthub@latest \
+    @google/gemini-cli@latest \
+    @steipete/bird@latest \
+    vibetunnel@latest \
+    markdansi sweetlink mcporter tokentally sweet-cookie \
+    axios cheerio lodash express nodemon shiki \
+    || warn "One or more global npm installs failed."
+
+  # Playwright OS deps + browser install (best effort)
+  log "Installing Playwright browsers + deps (best effort)"
+  npx -y playwright install --with-deps || warn "Playwright install/deps step failed."
+}
+
+install_docker() {
+  if need_cmd docker; then
+    log "Docker already installed: $(docker --version 2>/dev/null || true)"
+    return 0
+  fi
+  log "Installing Docker (get.docker.com convenience script)"
+  curl -fsSL https://get.docker.com | sh || { warn "Docker install failed."; return 0; }
+  sudo usermod -aG docker "${USER}" || true
+  sudo systemctl enable --now docker >/dev/null 2>&1 || true
+}
+
+
+install_tidewave() {
+  # Installs tidewave CLI to ~/.local/bin (best effort)
+  if need_cmd tidewave; then
+    log "tidewave already installed"
+    return 0
+  fi
+  log "Installing tidewave CLI (best effort)"
+  mkdir -p "$HOME/.local/bin"
+
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64) arch="x86_64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *) warn "Unknown architecture for tidewave CLI: $(uname -m). Skipping."; return 0 ;;
+  esac
+
+  local url
+  # Tidewave docs show musl builds; adjust if upstream changes.
+  url="https://github.com/tidewave-ai/tidewave_app/releases/latest/download/tidewave-cli-${arch}-unknown-linux-musl"
+
+  if curl -fsSL "$url" -o "$HOME/.local/bin/tidewave"; then
+    chmod +x "$HOME/.local/bin/tidewave"
+    log "Installed tidewave to ~/.local/bin/tidewave"
+  else
+    warn "Failed to download tidewave CLI from GitHub releases. Skipping."
+  fi
+}
+
+
+
+install_wacli() {
+  if need_cmd wacli; then
+    log "wacli already installed"
+    return 0
+  fi
+  if ! need_cmd go; then
+    warn "go not found; skipping wacli."
+    return 0
+  fi
+  log "Installing wacli via go install (best effort)"
+  GOBIN="$HOME/.local/bin" go install github.com/steipete/wacli/cmd/wacli@latest || warn "wacli install failed."
+}
+
+install_gogcli() {
+  # The command is "gog" (from gogcli project)
+  if need_cmd gog; then
+    log "gog already installed"
+    return 0
+  fi
+  if ! need_cmd go; then
+    warn "go not found; skipping gog."
+    return 0
+  fi
+  log "Installing gog (gogcli) via go install (best effort)"
+  GOBIN="$HOME/.local/bin" go install github.com/steipete/gogcli/cmd/gog@latest || warn "gog install failed."
+}
+
+
+install_agent_tooling_bundle() {
+  log "🧰 Installing agent tooling bundle..."
+
+  # Ensure prerequisites: Node and Rust are expected for this bundle.
+  # Node is needed for moltbot + CLIs; Rust is needed for cargo-installed tools like.
+  install_node
+  install_go
+  install_rust
+
+  # via cargo (optional utility)
+  if need_cmd cargo; then
+    if ! need_cmd; then
+      log "Installing via cargo"
+      cargo install || warn "htmlq install failed."
+    else
+      log "htmlq already installed"
+    fi
+  else
+    warn "cargo not found; skipping."
+  fi
+
+  install_bun
+  install_python_asdf
+  install_python_agent_libs
+  install_node_agent_tooling
+  install_wacli
+  install_gogcli
+  install_docker
+  install_tidewave
+
+  log "Agent tooling bundle complete."
+}
+
+
 main() {
   sudo_keepalive
   setup_managed_env
@@ -602,13 +815,15 @@ main() {
   DO_NODE="$(ask_yn "Install Node.js via NodeSource?" "Y")"
   DO_GO="$(ask_yn "Install Go to /usr/local/go?" "Y")"
   DO_RUST="$(ask_yn "Install Rust via rustup?" "Y")"
-  DO_HTMLQ="$(ask_yn "Install htmlq (via cargo; requires Rust)?" "N")"
-  DO_HTMLQ="$(ask_yn "Install htmlq (requires Rust; installed via cargo)?" "N")"
+  DO_HTMLQ="$(ask_yn "Install (via cargo; requires Rust)?" "N")"
+  DO_HTMLQ="$(ask_yn "Install (requires Rust; installed via cargo)?" "N")"
   DO_DB="$(ask_yn "Install full DB stack (Postgres 17 + PostGIS + pgvector)?" "Y")"
   DO_VSCODE="$(ask_yn "Install VS Code via Snap (--classic)?" "Y")"
   DO_OBSIDIAN="$(ask_yn "Install Obsidian via Snap?" "Y")"
   DO_OLLAMA="$(ask_yn "Install Ollama?" "Y")"
   DO_PULL_MODEL="$(ask_yn "Pull Ollama model (${OLLAMA_PULL_MODEL:-<none>})?" "Y")"
+
+  DO_AGENT_TOOLING="$(ask_yn "Install agent tooling bundle (Python/uv libs, Node AI CLIs incl. moltbot, Bun,, Playwright deps, Docker)?" "Y")"
 
   if [[ "$DO_HTMLQ" == "Y" ]]; then
     DO_RUST="Y"
@@ -635,6 +850,8 @@ main() {
   [[ "$DO_OBSIDIAN" == "Y" ]] && install_obsidian_snap
   [[ "$DO_OLLAMA" == "Y" ]] && install_ollama
   [[ "$DO_PULL_MODEL" == "Y" ]] && pull_ollama_model
+
+  [[ "$DO_AGENT_TOOLING" == "Y" ]] && install_agent_tooling_bundle
 
   log "Complete."
   warn "Notes:"
