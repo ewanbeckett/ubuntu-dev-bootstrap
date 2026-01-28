@@ -442,8 +442,9 @@ install_node() {
   ensure_nodesource_repo
   apt_install nodejs
 
+  mkdir -p "$HOME/.local/bin"
   if need_cmd corepack; then
-    corepack enable || true
+    corepack enable --install-directory "$HOME/.local/bin" || true
     corepack prepare pnpm@latest --activate >/dev/null 2>&1 || true
   fi
 }
