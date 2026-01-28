@@ -1,13 +1,19 @@
 # Ubuntu Dev Bootstrap
 
-Interactive Ubuntu installer for setting up a modern development environment with sensible defaults and optional tooling.
+Interactive installer for setting up a complete Ubuntu development environment with databases, language runtimes, and tooling commonly used for backend, BEAM, and automation work.
 
 **Repository:** https://github.com/ewanbeckett/ubuntu-dev-bootstrap  
-**Installer:** `installer.sh`
+**Installer:** `installer.sh`  
+**License:** MIT
+
+---
 
 ## Supported OS
+
 - Ubuntu 24.04
-- amd64 and arm64 (where upstream tools support it)
+- amd64 and arm64 (where supported by upstream tooling)
+
+---
 
 ## Quick Start
 
@@ -18,7 +24,9 @@ chmod +x installer.sh
 ./installer.sh
 ```
 
-The installer presents a menu. Only selected components are installed.
+The installer is menu-driven. Only the components you select are installed.
+
+---
 
 ## Non-Interactive Usage
 
@@ -28,61 +36,120 @@ Install everything with defaults:
 NONINTERACTIVE=1 DEFAULT_SELECT=all ./installer.sh
 ```
 
-Install selected items only:
+Install selected components:
 
 ```bash
-NONINTERACTIVE=1 DEFAULT_SELECT="1,2,7,14" ./installer.sh
+NONINTERACTIVE=1 DEFAULT_SELECT="1,4,7" ./installer.sh
 ```
 
-Override language versions:
+Override versions:
 
 ```bash
-NODE_MAJOR=22 GO_VERSION=1.22.7 RUBY_STRATEGY=asdf RUBY_VERSION=3.3.6 \
-NONINTERACTIVE=1 DEFAULT_SELECT="7,8,13" \
+NODE_MAJOR=22 \
+GO_VERSION=1.25.6 \
+RUBY_VERSION=4.0.1 \
+ERLANG_VERSION=28.3 \
+ELIXIR_VERSION=1.19.5-otp-28 \
+PGVECTOR_VERSION=0.8.1 \
+NONINTERACTIVE=1 DEFAULT_SELECT="3,4,7" \
 ./installer.sh
 ```
 
-## Included Components (Selectable)
+---
 
-- Base system packages
-- CLI quality-of-life tools
-- Automation utilities
-- Git extras (git-lfs, GitHub CLI)
-- Zsh + Oh My Zsh (non-destructive)
-- Docker + Compose
-- Node.js (version selectable)
-- Go (version selectable)
-- Rust, Bun, uv
-- Python virtual environment with dev tooling
-- Ruby (apt or asdf)
-- VS Code (Snap)
-- Obsidian (Snap)
-- Ollama (local LLM runtime)
-- Ansible
-- Terraform
+## Selectable Components
+
+1. **Core packages**  
+   System tools, media utilities, build dependencies, fonts, and full database prerequisites.
+
+2. **Zsh + Oh My Zsh**  
+   Installed non-destructively. Existing shell config is preserved.
+
+3. **Ruby (asdf)**  
+   Ruby with Bundler and Rails.
+
+4. **Erlang + Elixir + Phoenix (asdf)**  
+   Full BEAM stack with Phoenix installer.
+
+5. **Node.js (NodeSource)**  
+   Version-selectable Node with Corepack enabled.
+
+6. **Go (upstream tarball)**  
+   Version-selectable Go installed to `/usr/local/go`.
+
+7. **Full database stack**  
+   - PostgreSQL 17  
+   - PostGIS  
+   - pgvector (built from source)  
+   - pgvector extension created automatically
+
+8. **VS Code**  
+   Installed via Snap (`--classic`), matching Ubuntu App Center behavior.
+
+9. **Obsidian**  
+   Installed via Snap.
+
+10. **Ollama**  
+    Local LLM runtime.
+
+11. **Ollama model pull**  
+    Optional model download (default: `llama3`).
+
+---
+
+## Core Packages Installed
+
+When selecting **Core packages**, the installer installs (best-effort):
+
+- Git, GitHub CLI, curl, wget, build tools
+- Zsh and Powerline fonts
+- Media and rendering tools (ffmpeg, mpv, ImageMagick, Ghostscript)
+- HTML/JSON tools (`jq`, `htmlq`)
+- Security and cert tools (`mkcert`, `libnss3-tools`)
+- SQLite and development headers
+- PostgreSQL 17, PostGIS, and server headers
+- Erlang/Elixir build dependencies (wxWidgets, OpenJDK, ncurses, SSL, XML, YAML)
+
+VS Code is intentionally installed separately via Snap.
+
+---
 
 ## Defaults
 
+Defaults are shown during installation and can be overridden.
+
 | Tool | Default |
 |-----|---------|
-| Node.js | 20.x |
-| Go | 1.22.7 |
-| Ruby | Ubuntu apt |
-| Ruby (asdf) | 3.3.6 |
-| Terraform | HashiCorp apt repo |
-| Ollama model | llama3.1:8b |
+| Node.js | 22.x |
+| Go | 1.25.6 |
+| Ruby | 4.0.1 |
+| Erlang | 28.3 |
+| Elixir | 1.19.5-otp-28 |
+| pgvector | 0.8.1 |
+| Ollama model | llama3 |
 
-All defaults can be overridden during installation.
+---
 
 ## Shell Configuration
 
 The installer does **not** overwrite existing shell configuration files.
 
 It adds managed environment files:
+
 - `~/.config/ai-forge/env.sh`
 - `~/.config/ai-forge/env.zsh`
 
 These are sourced from existing shell profiles if present.
+
+---
+
+## Notes
+
+- PostgreSQL extensions are created on a best-effort basis; the database service must be running.
+- Some packages may vary by Ubuntu release; the installer continues when non-critical packages are unavailable.
+- Re-running the installer is supported.
+
+---
 
 ## License
 
