@@ -272,7 +272,7 @@ install_core_packages_mandatory() {
   apt_install_best_effort \
     git gh build-essential dirmngr gawk zsh fonts-powerline \
     pkg-config libpixman-1-dev libcairo2-dev libpango1.0-dev libjpeg-dev \
-    libgif-dev librsvg2-dev ffmpeg unzip jq htmlq mpv libnss3-tools \
+    libgif-dev librsvg2-dev ffmpeg unzip jq mpv libnss3-tools \
     imagemagick ghostscript mkcert fzf ripgrep bat inotify-tools \
     sqlite3 libsqlite3-dev \
     autoconf m4 libwxgtk3.2-dev libwxgtk-webview3.2-dev libgl1-mesa-dev \
@@ -425,7 +425,31 @@ install_rust() {
     log "Installing Rust via rustup"
     curl -fsSL https://sh.rustup.rs | sh -s -- -y
   fi
+
+  # Ensure cargo/rust tools are available in the current shell session
+  if [[ -f "$HOME/.cargo/env" ]]; then
+    # shellcheck disable=SC1090
+    . "$HOME/.cargo/env"
+  else
+    export PATH="$HOME/.cargo/bin:$PATH"
+  fi
 }
+
+install_htmlq() {
+  if need_cmd htmlq; then
+    log "htmlq already installed: $(htmlq --version 2>/dev/null || true)"
+    return 0
+  fi
+
+  if ! need_cmd cargo; then
+    die "htmlq requires Rust (cargo). Please install Rust (rustup) first."
+  fi
+
+  log "Installing htmlq via cargo"
+  cargo install htmlq
+}
+
+
 
 install_pgvector_from_source() {
   log "Installing pgvector v${PGVECTOR_VERSION} from source"
@@ -524,7 +548,7 @@ main() {
     OLLAMA_PULL_MODEL="$(ask_line "Ollama model to pull (empty to skip)" "$OLLAMA_PULL_MODEL")"
   fi
 
-  local DO_ZSH DO_RUBY DO_BEAM DO_NODE DO_GO DO_DB DO_VSCODE DO_OBSIDIAN DO_OLLAMA DO_PULL_MODEL DO_RUST
+  local DO_ZSH DO_RUBY DO_BEAM DO_NODE DO_GO DO_DB DO_VSCODE DO_OBSIDIAN DO_OLLAMA DO_PULL_MODEL DO_RUST DO_HTMLQ
 
   DO_ZSH="$(ask_yn "Install Zsh + Oh My Zsh (non-destructive)?" "Y")"
   DO_RUBY="$(ask_yn "Install Ruby via asdf (Bundler + Rails)?" "Y")"
@@ -532,6 +556,7 @@ main() {
   DO_NODE="$(ask_yn "Install Node.js via NodeSource?" "Y")"
   DO_GO="$(ask_yn "Install Go to /usr/local/go?" "Y")"
   DO_RUST="$(ask_yn "Install Rust via rustup?" "Y")"
+  DO_HTMLQ="$(ask_yn "Install htmlq (requires Rust; installed via cargo)?" "N")"
   DO_DB="$(ask_yn "Install full DB stack (Postgres 17 + PostGIS + pgvector)?" "Y")"
   DO_VSCODE="$(ask_yn "Install VS Code via Snap (--classic)?" "Y")"
   DO_OBSIDIAN="$(ask_yn "Install Obsidian via Snap?" "Y")"
@@ -542,12 +567,17 @@ main() {
     DO_PULL_MODEL="N"
   fi
 
+  if [[ "${DO_HTMLQ:-N}" == "Y" ]]; then
+    DO_RUST="Y"
+  fi
+
   [[ "$DO_ZSH" == "Y" ]] && install_zsh_stack
   [[ "$DO_RUBY" == "Y" ]] && install_ruby_asdf
   [[ "$DO_BEAM" == "Y" ]] && install_beam_and_phoenix
   [[ "$DO_NODE" == "Y" ]] && install_node
   [[ "$DO_GO" == "Y" ]] && install_go
   [[ "$DO_RUST" == "Y" ]] && install_rust
+  [[ "${DO_HTMLQ:-N}" == "Y" ]] && install_htmlq
   [[ "$DO_DB" == "Y" ]] && install_db_stack_full
   [[ "$DO_VSCODE" == "Y" ]] && install_vscode_snap
   [[ "$DO_OBSIDIAN" == "Y" ]] && install_obsidian_snap
