@@ -335,19 +335,54 @@ install_zsh_stack() {
 }
 
 install_asdf() {
-  if [[ -d "$HOME/.asdf" ]]; then
+  # Ensure asdf >= 0.16 (Go rewrite) is installed as a binary on PATH.
+  # Keep ASDF_DATA_DIR at ~/.asdf for plugins/installs/shims.
+  local asdf_bin="$HOME/.local/bin/asdf"
+  local asdf_ver="v0.18.0"
+  local arch
+  local tmp
+
+  mkdir -p "$HOME/.local/bin"
+  export ASDF_DATA_DIR="${ASDF_DATA_DIR:-$HOME/.asdf}"
+
+  if [[ -x "$asdf_bin" ]]; then
     return 0
   fi
-  log "Installing asdf"
-  git clone https://github.com/asdf-vm/asdf.git "$HOME/.asdf" --branch v0.16.0
-  append_once '. "$HOME/.asdf/asdf.sh"' "$HOME/.bashrc"
-  append_once '. "$HOME/.asdf/asdf.sh"' "$HOME/.zshrc"
-  append_once '. "$HOME/.asdf/asdf.sh"' "$HOME/.profile"
+
+  log "Installing asdf ${asdf_ver} (precompiled binary)"
+  arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+  case "$arch" in
+    amd64) arch="amd64" ;;
+    arm64) arch="arm64" ;;
+    *) die "Unsupported architecture for asdf binary: $arch" ;;
+  esac
+
+  tmp="$(mktemp -d)"
+  curl -fsSL "https://github.com/asdf-vm/asdf/releases/download/${asdf_ver}/asdf-${asdf_ver#v}-linux-${arch}.tar.gz" -o "$tmp/asdf.tgz"
+  tar -xzf "$tmp/asdf.tgz" -C "$tmp"
+  install -m 0755 "$tmp/asdf" "$asdf_bin"
+  rm -rf "$tmp"
+
+  # Ensure shells load the managed env (already sets ~/.local/bin on PATH).
+  setup_managed_env
 }
 
 asdf_source() {
-  # shellcheck disable=SC1090
-  . "$HOME/.asdf/asdf.sh" || true
+  # Ensure the asdf binary we installed is used, and shims are available.
+  export ASDF_DATA_DIR="${ASDF_DATA_DIR:-$HOME/.asdf}"
+  export PATH="$HOME/.local/bin:$ASDF_DATA_DIR/shims:$PATH"
+  hash -r 2>/dev/null || true
+
+  # Basic sanity check
+  if ! command -v asdf >/dev/null 2>&1; then
+    die "asdf not found on PATH after install"
+  fi
+
+  local v
+  v="$(asdf --version 2>/dev/null || true)"
+  if [[ "$v" != v0.* ]]; then
+    warn "Unexpected asdf version output: $v"
+  fi
 }
 
 install_ruby_asdf() {
@@ -426,12 +461,10 @@ install_rust() {
     curl -fsSL https://sh.rustup.rs | sh -s -- -y
   fi
 
-  # Ensure cargo/rust tools are available in the current shell session
+  # Make cargo available in the current session
   if [[ -f "$HOME/.cargo/env" ]]; then
     # shellcheck disable=SC1090
     . "$HOME/.cargo/env"
-  else
-    export PATH="$HOME/.cargo/bin:$PATH"
   fi
 }
 
@@ -548,7 +581,7 @@ main() {
     OLLAMA_PULL_MODEL="$(ask_line "Ollama model to pull (empty to skip)" "$OLLAMA_PULL_MODEL")"
   fi
 
-  local DO_ZSH DO_RUBY DO_BEAM DO_NODE DO_GO DO_DB DO_VSCODE DO_OBSIDIAN DO_OLLAMA DO_PULL_MODEL DO_RUST DO_HTMLQ
+  local DO_ZSH DO_RUBY DO_BEAM DO_NODE DO_GO DO_DB DO_VSCODE DO_OBSIDIAN DO_OLLAMA DO_PULL_MODEL DO_RUST DO_HTMLQ DO_HTMLQ
 
   DO_ZSH="$(ask_yn "Install Zsh + Oh My Zsh (non-destructive)?" "Y")"
   DO_RUBY="$(ask_yn "Install Ruby via asdf (Bundler + Rails)?" "Y")"
@@ -556,12 +589,17 @@ main() {
   DO_NODE="$(ask_yn "Install Node.js via NodeSource?" "Y")"
   DO_GO="$(ask_yn "Install Go to /usr/local/go?" "Y")"
   DO_RUST="$(ask_yn "Install Rust via rustup?" "Y")"
+  DO_HTMLQ="$(ask_yn "Install htmlq (via cargo; requires Rust)?" "N")"
   DO_HTMLQ="$(ask_yn "Install htmlq (requires Rust; installed via cargo)?" "N")"
   DO_DB="$(ask_yn "Install full DB stack (Postgres 17 + PostGIS + pgvector)?" "Y")"
   DO_VSCODE="$(ask_yn "Install VS Code via Snap (--classic)?" "Y")"
   DO_OBSIDIAN="$(ask_yn "Install Obsidian via Snap?" "Y")"
   DO_OLLAMA="$(ask_yn "Install Ollama?" "Y")"
   DO_PULL_MODEL="$(ask_yn "Pull Ollama model (${OLLAMA_PULL_MODEL:-<none>})?" "Y")"
+
+  if [[ "$DO_HTMLQ" == "Y" ]]; then
+    DO_RUST="Y"
+  fi
 
   if [[ "$DO_OLLAMA" != "Y" ]]; then
     DO_PULL_MODEL="N"
@@ -577,6 +615,7 @@ main() {
   [[ "$DO_NODE" == "Y" ]] && install_node
   [[ "$DO_GO" == "Y" ]] && install_go
   [[ "$DO_RUST" == "Y" ]] && install_rust
+  [[ "$DO_HTMLQ" == "Y" ]] && install_htmlq
   [[ "${DO_HTMLQ:-N}" == "Y" ]] && install_htmlq
   [[ "$DO_DB" == "Y" ]] && install_db_stack_full
   [[ "$DO_VSCODE" == "Y" ]] && install_vscode_snap
