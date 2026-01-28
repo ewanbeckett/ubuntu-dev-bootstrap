@@ -370,7 +370,7 @@ install_asdf() {
   esac
 
   tmp="$(mktemp -d)"
-  curl -fsSL "https://github.com/asdf-vm/asdf/releases/download/${asdf_ver}/asdf-${asdf_ver#v}-linux-${arch}.tar.gz" -o "$tmp/asdf.tgz"
+  curl -fsSL "https://github.com/asdf-vm/asdf/releases/download/${asdf_ver}/asdf-${asdf_ver}-linux-${arch}.tar.gz" -o "$tmp/asdf.tgz"
   tar -xzf "$tmp/asdf.tgz" -C "$tmp"
   install -m 0755 "$tmp/asdf" "$asdf_bin"
   rm -rf "$tmp"
