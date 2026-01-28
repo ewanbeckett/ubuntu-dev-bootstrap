@@ -68,6 +68,14 @@ is_ubuntu() {
   [[ "${ID:-}" == "ubuntu" ]] || [[ "${ID_LIKE:-}" == *ubuntu* ]]
 }
 
+is_ubuntu_24() {
+  # Enforce Ubuntu 24.04 LTS specifically, per repo scope
+  [[ -r /etc/os-release ]] || return 1
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  [[ "${VERSION_ID:-}" == "24.04" ]]
+}
+
 apt_update() {
   log "Updating apt indices"
   sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
@@ -190,7 +198,7 @@ normalize_selection() {
   local s="${1:-}"
   s="${s// /}"
   if [[ "$s" == "all" ]]; then
-    echo "1,2,3,4,5,6,7,8,9,10,11,12"
+    echo "2,3,4,5,6,7,8,9,10,11"
   else
     echo "$s"
   fi
@@ -219,6 +227,7 @@ ensure_pgdg_repo() {
 }
 
 ensure_github_cli_repo() {
+  # Ubuntu 24.04 includes gh in the default repos, but keeping this is harmless and ensures current gh.
   if [[ -f /etc/apt/sources.list.d/github-cli.list ]]; then
     return 0
   fi
@@ -234,26 +243,23 @@ ensure_github_cli_repo() {
 ############################################
 # Core installer steps
 ############################################
-install_core_packages_exact() {
-  # Per your request: install the full core package set you provided.
-  # Note: VS Code is installed via Snap (menu item) to follow Ubuntu App Store behavior,
-  # so we do NOT install `code` via apt here even though it’s listed in your snippet.
-  #
-  # Also: PG packages require PGDG repo to exist first.
+install_core_packages_mandatory() {
+  # Per your direction:
+  # - Core apt packages are NOT optional and run before everything else.
+  # - Do not duplicate anything installed in other sections.
+  # Therefore: do NOT install Postgres/PostGIS/pg packages here (those are in DB stack).
+  # VS Code is installed via Snap (menu item) to follow Ubuntu App Center behavior.
 
-  log "📦 Installing core tools, Databases, and Language deps..."
+  log "📦 Installing core tools and language build dependencies (mandatory)..."
 
   ensure_github_cli_repo
-  ensure_pgdg_repo
   apt_update
 
-  # htmlq package availability varies; we try best-effort install.
   apt_install_best_effort \
     git gh curl wget build-essential dirmngr gawk zsh fonts-powerline \
     pkg-config libpixman-1-dev libcairo2-dev libpango1.0-dev libjpeg-dev \
     libgif-dev librsvg2-dev ffmpeg unzip jq htmlq mpv libnss3-tools \
     imagemagick ghostscript mkcert fzf ripgrep bat inotify-tools \
-    postgresql-17 postgresql-client-17 postgresql-17-postgis-3 postgresql-server-dev-17 \
     sqlite3 libsqlite3-dev \
     autoconf m4 libwxgtk3.2-dev libwxgtk-webview3.2-dev libgl1-mesa-dev \
     libglu1-mesa-dev libpng-dev libssh-dev unixodbc-dev xsltproc fop \
@@ -269,10 +275,7 @@ install_core_packages_exact() {
 }
 
 install_zsh_stack() {
-  # core packages already include zsh, but keep safe to call
-  if ! need_cmd zsh; then
-    apt_install zsh
-  fi
+  # zsh is part of mandatory core packages; do not reinstall here.
   setup_managed_env
 
   if [[ "${SHELL:-}" != "$(command -v zsh)" ]]; then
@@ -322,9 +325,6 @@ install_ruby_asdf() {
 install_beam_and_phoenix() {
   install_asdf
   asdf_source
-
-  # Deps are covered by core packages list, but safe to ensure minimum
-  apt_install inotify-tools openjdk-11-jdk autoconf m4 libncurses-dev
 
   asdf plugin add erlang >/dev/null 2>&1 || true
   if ! asdf list erlang 2>/dev/null | grep -q "$ERLANG_VERSION"; then
@@ -447,7 +447,7 @@ install_obsidian_snap() {
 ############################################
 print_menu() {
   cat <<EOF
-Ubuntu Dev Bootstrap - installer.sh
+Ubuntu Dev Bootstrap - installer.sh (Ubuntu 24.04 LTS)
 
 Defaults (override via env or prompted):
   Node major:     ${NODE_MAJOR}
@@ -458,9 +458,11 @@ Defaults (override via env or prompted):
   pgvector ver:   ${PGVECTOR_VERSION}
   Ollama model:   ${OLLAMA_PULL_MODEL}
 
+Mandatory:
+  - Core apt packages are installed automatically at startup.
+
 Select items (comma-separated) or 'all':
 
-  1) Core packages (your full list; VS Code via Snap separately)
   2) Zsh + Oh My Zsh (non-destructive)
   3) asdf + Ruby (Rails)
   4) asdf + Erlang + Elixir + Phoenix
@@ -477,8 +479,12 @@ EOF
 
 main() {
   is_ubuntu || die "This installer targets Ubuntu."
+  is_ubuntu_24 || die "This repository targets Ubuntu 24.04 LTS specifically (VERSION_ID=24.04)."
   sudo_keepalive
   setup_managed_env
+
+  # Mandatory core packages (run before any other selections)
+  install_core_packages_mandatory
 
   # Version prompts (interactive only)
   if [[ "$NONINTERACTIVE" != "1" ]]; then
@@ -494,7 +500,7 @@ main() {
   local selection
   if [[ "$NONINTERACTIVE" == "1" ]]; then
     selection="$(normalize_selection "$DEFAULT_SELECT")"
-    [[ -n "$selection" ]] || die "NONINTERACTIVE=1 requires DEFAULT_SELECT (e.g. all or 1,2,3)"
+    [[ -n "$selection" ]] || die "NONINTERACTIVE=1 requires DEFAULT_SELECT (e.g. all or 2,3,7)"
   else
     print_menu
     selection="$(ask_line "Enter selection" "")"
@@ -502,10 +508,6 @@ main() {
     [[ -n "$selection" ]] || die "No selection provided."
   fi
 
-  # Always update indices once early; repos are added by steps as needed
-  apt_update
-
-  has_choice "$selection" 1  && install_core_packages_exact
   has_choice "$selection" 2  && install_zsh_stack
   has_choice "$selection" 3  && install_ruby_asdf
   has_choice "$selection" 4  && install_beam_and_phoenix
