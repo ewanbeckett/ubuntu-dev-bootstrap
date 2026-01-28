@@ -198,7 +198,7 @@ normalize_selection() {
   local s="${1:-}"
   s="${s// /}"
   if [[ "$s" == "all" ]]; then
-    echo "2,3,4,5,6,7,8,9,10,11"
+    echo "2,3,4,5,6,7,8,9,10,11,12"
   else
     echo "$s"
   fi
@@ -383,6 +383,15 @@ install_go() {
   append_once 'export PATH="/usr/local/go/bin:$PATH"' "$HOME/.config/ai-forge/env.sh"
 }
 
+install_rust() {
+  if need_cmd rustup; then
+    log "Rust already installed: $(rustc --version 2>/dev/null || true)"
+  else
+    log "Installing Rust via rustup"
+    curl -fsSL https://sh.rustup.rs | sh -s -- -y
+  fi
+}
+
 install_pgvector_from_source() {
   log "Installing pgvector v${PGVECTOR_VERSION} from source"
   cd /tmp
@@ -473,6 +482,7 @@ Select items (comma-separated) or 'all':
   9) Obsidian (Snap)
  10) Ollama
  11) Pull Ollama model
+ 12) Rust (rustup)
 
 EOF
 }
@@ -518,6 +528,7 @@ main() {
   has_choice "$selection" 9  && install_obsidian_snap
   has_choice "$selection" 10 && install_ollama
   has_choice "$selection" 11 && pull_ollama_model
+  has_choice "$selection" 12 && install_rust
 
   log "Complete."
   warn "Notes:"
