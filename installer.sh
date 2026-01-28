@@ -3,12 +3,32 @@ set -euo pipefail
 IFS=$'\n\t'
 
 ############################################
+# STAGE 0 BOOTSTRAP (no curl assumptions)
+############################################
+# Fresh Ubuntu 24.04 does NOT guarantee curl/wget/gnupg/lsb-release.
+# This bootstrap step ensures the installer can add repos and fetch keys safely.
+
+if ! command -v sudo >/dev/null 2>&1; then
+  echo "sudo is required to run this installer."
+  exit 1
+fi
+
+sudo -v
+
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  ca-certificates \
+  curl \
+  wget \
+  gnupg \
+  lsb-release
+
+############################################
 # Defaults (override via env or prompts)
 ############################################
 : "${NONINTERACTIVE:=0}"
 : "${DEFAULT_SELECT:=}"
 
-# Match original gist-style defaults (adjust as you prefer)
 : "${DEFAULT_NODE_MAJOR:=22}"
 : "${NODE_MAJOR:=$DEFAULT_NODE_MAJOR}"
 
@@ -54,7 +74,6 @@ trap 'on_err $LINENO' ERR
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 sudo_keepalive() {
-  need_cmd sudo || die "sudo is required"
   sudo -v
   while true; do sudo -n true 2>/dev/null || true; sleep 60; done &
   SUDO_KA_PID=$!
@@ -69,7 +88,6 @@ is_ubuntu() {
 }
 
 is_ubuntu_24() {
-  # Enforce Ubuntu 24.04 LTS specifically, per repo scope
   [[ -r /etc/os-release ]] || return 1
   # shellcheck disable=SC1091
   . /etc/os-release
@@ -227,7 +245,7 @@ ensure_pgdg_repo() {
 }
 
 ensure_github_cli_repo() {
-  # Ubuntu 24.04 includes gh in the default repos, but keeping this is harmless and ensures current gh.
+  # Ubuntu 24.04 includes gh in default repos, but this keeps it current and consistent.
   if [[ -f /etc/apt/sources.list.d/github-cli.list ]]; then
     return 0
   fi
@@ -244,11 +262,9 @@ ensure_github_cli_repo() {
 # Core installer steps
 ############################################
 install_core_packages_mandatory() {
-  # Per your direction:
-  # - Core apt packages are NOT optional and run before everything else.
-  # - Do not duplicate anything installed in other sections.
-  # Therefore: do NOT install Postgres/PostGIS/pg packages here (those are in DB stack).
-  # VS Code is installed via Snap (menu item) to follow Ubuntu App Center behavior.
+  # Mandatory core apt packages (no duplication with other steps).
+  # Do NOT install Postgres/PostGIS/PG dev packages here (installed by DB stack).
+  # VS Code is installed via Snap (menu item) to match Ubuntu App Center behavior.
 
   log "📦 Installing core tools and language build dependencies (mandatory)..."
 
@@ -490,6 +506,7 @@ EOF
 main() {
   is_ubuntu || die "This installer targets Ubuntu."
   is_ubuntu_24 || die "This repository targets Ubuntu 24.04 LTS specifically (VERSION_ID=24.04)."
+
   sudo_keepalive
   setup_managed_env
 
