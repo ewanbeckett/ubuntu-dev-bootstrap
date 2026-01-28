@@ -148,6 +148,18 @@ arch_go() {
   esac
 }
 
+
+arch_asdf() {
+  local a
+  a="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+  case "$a" in
+    amd64|x86_64) echo "amd64" ;;
+    arm64|aarch64) echo "arm64" ;;
+    *) die "Unsupported architecture for asdf binary install: $a" ;;
+  esac
+}
+
+
 ############################################
 # Prompts
 ############################################
@@ -322,7 +334,7 @@ install_zsh_stack() {
 
   if [[ "${SHELL:-}" != "$(command -v zsh)" ]]; then
     log "Setting default shell to zsh (may prompt for password)"
-    chsh -s "$(command -v zsh)" || warn "Could not change default shell. Run: chsh -s $(command -v zsh)"
+    sudo chsh -s "$(command -v zsh)" "${USER}" || warn "Could not change default shell. You can run: sudo chsh -s $(command -v zsh) ${USER}"
   fi
 
   if [[ ! -d "$HOME/.oh-my-zsh" ]]; then
