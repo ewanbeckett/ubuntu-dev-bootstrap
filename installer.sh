@@ -6,7 +6,7 @@ IFS=$'\n\t'
 # STAGE 0 BOOTSTRAP (no curl assumptions)
 ############################################
 # Fresh Ubuntu 24.04 does NOT guarantee curl/wget/gnupg/lsb-release.
-# This bootstrap step ensures the installer can add repos and fetch keys safely.
+# Bootstrap the absolute minimum using only apt + sudo.
 
 if ! command -v sudo >/dev/null 2>&1; then
   echo "sudo is required to run this installer."
@@ -27,28 +27,27 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 # Defaults (override via env or prompts)
 ############################################
 : "${NONINTERACTIVE:=0}"
-: "${DEFAULT_SELECT:=}"
 
 : "${DEFAULT_NODE_MAJOR:=22}"
-: "${NODE_MAJOR:=$DEFAULT_NODE_MAJOR}"
+: "${NODE_MAJOR:=${NODE_MAJOR:-$DEFAULT_NODE_MAJOR}}"
 
 : "${DEFAULT_GO_VERSION:=1.25.6}"
-: "${GO_VERSION:=$DEFAULT_GO_VERSION}"
+: "${GO_VERSION:=${GO_VERSION:-$DEFAULT_GO_VERSION}}"
 
 : "${DEFAULT_RUBY_VERSION:=4.0.1}"
-: "${RUBY_VERSION:=$DEFAULT_RUBY_VERSION}"
+: "${RUBY_VERSION:=${RUBY_VERSION:-$DEFAULT_RUBY_VERSION}}"
 
 : "${DEFAULT_ERLANG_VERSION:=28.3}"
-: "${ERLANG_VERSION:=$DEFAULT_ERLANG_VERSION}"
+: "${ERLANG_VERSION:=${ERLANG_VERSION:-$DEFAULT_ERLANG_VERSION}}"
 
 : "${DEFAULT_ELIXIR_VERSION:=1.19.5-otp-28}"
-: "${ELIXIR_VERSION:=$DEFAULT_ELIXIR_VERSION}"
+: "${ELIXIR_VERSION:=${ELIXIR_VERSION:-$DEFAULT_ELIXIR_VERSION}}"
 
 : "${DEFAULT_PGVECTOR_VERSION:=0.8.1}"
-: "${PGVECTOR_VERSION:=$DEFAULT_PGVECTOR_VERSION}"
+: "${PGVECTOR_VERSION:=${PGVECTOR_VERSION:-$DEFAULT_PGVECTOR_VERSION}}"
 
 : "${DEFAULT_OLLAMA_PULL_MODEL:=llama3}"
-: "${OLLAMA_PULL_MODEL:=$DEFAULT_OLLAMA_PULL_MODEL}"  # empty to skip
+: "${OLLAMA_PULL_MODEL:=${OLLAMA_PULL_MODEL:-$DEFAULT_OLLAMA_PULL_MODEL}}"  # empty to skip
 
 : "${PY_VENV_DIR:=$HOME/.venvs/agents}"
 
@@ -69,43 +68,38 @@ on_err() {
 trap 'on_err $LINENO' ERR
 
 ############################################
-# Helpers
+# OS enforcement
 ############################################
-need_cmd() { command -v "$1" >/dev/null 2>&1; }
+. /etc/os-release
+[[ "${ID:-}" == "ubuntu" && "${VERSION_ID:-}" == "24.04" ]] || die "This installer targets Ubuntu 24.04 LTS only."
 
-sudo_keepalive() {
-  sudo -v
-  while true; do sudo -n true 2>/dev/null || true; sleep 60; done &
-  SUDO_KA_PID=$!
-  trap 'kill "${SUDO_KA_PID:-0}" 2>/dev/null || true' EXIT
+############################################
+# APT update/install strategy
+############################################
+# We already ran apt-get update in Stage 0.
+APT_UPDATED=1
+APT_REPO_DIRTY=0
+
+apt_update_once() {
+  if [[ "$APT_UPDATED" -eq 0 || "$APT_REPO_DIRTY" -eq 1 ]]; then
+    log "Updating apt indices"
+    sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
+    APT_UPDATED=1
+    APT_REPO_DIRTY=0
+  fi
 }
 
-is_ubuntu() {
-  [[ -r /etc/os-release ]] || return 1
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  [[ "${ID:-}" == "ubuntu" ]] || [[ "${ID_LIKE:-}" == *ubuntu* ]]
-}
-
-is_ubuntu_24() {
-  [[ -r /etc/os-release ]] || return 1
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  [[ "${VERSION_ID:-}" == "24.04" ]]
-}
-
-apt_update() {
-  log "Updating apt indices"
-  sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
+mark_repo_dirty() {
+  APT_REPO_DIRTY=1
 }
 
 apt_install() {
+  apt_update_once
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
 }
 
 apt_install_best_effort() {
-  # Tries to install all packages. If apt fails due to one unknown package,
-  # it retries individually to install as many as possible.
+  apt_update_once
   local pkgs=("$@")
   log "Installing packages (best effort): ${pkgs[*]}"
   if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${pkgs[@]}"; then
@@ -135,6 +129,15 @@ append_once() {
   grep -Fqx "$line" "$file" 2>/dev/null || printf "\n%s\n" "$line" >>"$file"
 }
 
+need_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+sudo_keepalive() {
+  sudo -v
+  while true; do sudo -n true 2>/dev/null || true; sleep 60; done &
+  SUDO_KA_PID=$!
+  trap 'kill "${SUDO_KA_PID:-0}" 2>/dev/null || true' EXIT
+}
+
 arch_go() {
   local a
   a="$(dpkg --print-architecture 2>/dev/null || uname -m)"
@@ -145,33 +148,95 @@ arch_go() {
   esac
 }
 
-ensure_snapd() {
-  if need_cmd snap; then return 0; fi
-  log "Installing snapd (required for Snap installs)"
-  apt_install snapd
-  sudo systemctl enable --now snapd.socket >/dev/null 2>&1 || true
-}
-
-snap_install() {
-  local name="$1"
-  if snap list "$name" >/dev/null 2>&1; then
-    log "Snap already installed: $name"
-  else
-    log "Installing Snap: $name"
-    sudo snap install "$name"
+############################################
+# Prompts
+############################################
+ask_line() {
+  local prompt="$1"
+  local def="${2:-}"
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    echo "$def"
+    return 0
   fi
+  local ans=""
+  read -r -p "${prompt} [default: ${def}] " ans
+  echo "${ans:-$def}"
 }
 
-snap_install_classic() {
-  local name="$1"
-  if snap list "$name" >/dev/null 2>&1; then
-    log "Snap already installed: $name"
-  else
-    log "Installing Snap: $name (classic)"
-    sudo snap install "$name" --classic
+ask_yn() {
+  # Default YES unless explicitly answered n/N
+  local prompt="$1"
+  local def="${2:-Y}"  # Y or N
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    [[ "$def" == "Y" ]] && echo "Y" || echo "N"
+    return 0
   fi
+
+  local suffix=""
+  if [[ "$def" == "Y" ]]; then
+    suffix=" [Y/n] "
+  else
+    suffix=" [y/N] "
+  fi
+
+  local ans=""
+  read -r -p "${prompt}${suffix}" ans
+  ans="${ans:-$def}"
+  case "$ans" in
+    Y|y) echo "Y" ;;
+    N|n) echo "N" ;;
+    *)   echo "$def" ;;
+  esac
 }
 
+############################################
+# Repo setup helpers (PGDG + GH CLI)
+############################################
+ensure_github_cli_repo() {
+  if [[ -f /etc/apt/sources.list.d/github-cli.list ]]; then
+    return 0
+  fi
+  ensure_keyrings_dir
+  log "Adding GitHub CLI apt repository"
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | sudo tee /etc/apt/keyrings/githubcli.gpg >/dev/null
+  sudo chmod go+r /etc/apt/keyrings/githubcli.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli.gpg] https://cli.github.com/packages stable main" \
+    | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+  mark_repo_dirty
+}
+
+ensure_pgdg_repo() {
+  if [[ -f /etc/apt/sources.list.d/pgdg.list ]]; then
+    return 0
+  fi
+  log "Adding PGDG apt repository (PostgreSQL 17)"
+  sudo install -d /usr/share/postgresql-common/pgdg
+  sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+    https://www.postgresql.org/media/keys/ACCC4CF8.asc
+  local codename
+  codename="$(lsb_release -cs)"
+  echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main" \
+    | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+  mark_repo_dirty
+}
+
+ensure_nodesource_repo() {
+  if [[ -f /etc/apt/sources.list.d/nodesource.list ]]; then
+    return 0
+  fi
+  ensure_keyrings_dir
+  log "Adding NodeSource apt repository (Node ${NODE_MAJOR}.x)"
+  curl -fsSL "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key" \
+    | sudo gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+    | sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null
+  mark_repo_dirty
+}
+
+############################################
+# Environment management
+############################################
 setup_managed_env() {
   local zenv="$HOME/.config/ai-forge/env.zsh"
   local shenv="$HOME/.config/ai-forge/env.sh"
@@ -195,84 +260,17 @@ EOF
   append_once '[ -f "$HOME/.config/ai-forge/env.sh" ] && . "$HOME/.config/ai-forge/env.sh"' "$HOME/.profile"
 }
 
-ask_line() {
-  local prompt="$1"
-  local def="${2:-}"
-  if [[ "$NONINTERACTIVE" == "1" ]]; then
-    echo "$def"
-    return 0
-  fi
-  local ans=""
-  if [[ -n "$def" ]]; then
-    read -r -p "${prompt} [default: ${def}] " ans
-    echo "${ans:-$def}"
-  else
-    read -r -p "${prompt} " ans
-    echo "$ans"
-  fi
-}
-
-normalize_selection() {
-  local s="${1:-}"
-  s="${s// /}"
-  if [[ "$s" == "all" ]]; then
-    echo "2,3,4,5,6,7,8,9,10,11,12"
-  else
-    echo "$s"
-  fi
-}
-
-has_choice() {
-  local list="$1" item="$2"
-  [[ ",${list}," == *",${item},"* ]]
-}
-
 ############################################
-# Repo setup helpers (PGDG + GH CLI)
-############################################
-ensure_pgdg_repo() {
-  if [[ -f /etc/apt/sources.list.d/pgdg.list ]]; then
-    return 0
-  fi
-  log "Adding PGDG apt repository (PostgreSQL 17)"
-  sudo install -d /usr/share/postgresql-common/pgdg
-  sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-    https://www.postgresql.org/media/keys/ACCC4CF8.asc
-  local codename
-  codename="$(lsb_release -cs)"
-  echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main" \
-    | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-}
-
-ensure_github_cli_repo() {
-  # Ubuntu 24.04 includes gh in default repos, but this keeps it current and consistent.
-  if [[ -f /etc/apt/sources.list.d/github-cli.list ]]; then
-    return 0
-  fi
-  ensure_keyrings_dir
-  log "Adding GitHub CLI apt repository"
-  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-    | sudo tee /etc/apt/keyrings/githubcli.gpg >/dev/null
-  sudo chmod go+r /etc/apt/keyrings/githubcli.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli.gpg] https://cli.github.com/packages stable main" \
-    | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-}
-
-############################################
-# Core installer steps
+# Mandatory core packages (no duplication)
 ############################################
 install_core_packages_mandatory() {
-  # Mandatory core apt packages (no duplication with other steps).
-  # Do NOT install Postgres/PostGIS/PG dev packages here (installed by DB stack).
-  # VS Code is installed via Snap (menu item) to match Ubuntu App Center behavior.
-
   log "📦 Installing core tools and language build dependencies (mandatory)..."
 
   ensure_github_cli_repo
-  apt_update
 
+  # Stage 0 already installed: ca-certificates curl wget gnupg lsb-release
   apt_install_best_effort \
-    git gh curl wget build-essential dirmngr gawk zsh fonts-powerline \
+    git gh build-essential dirmngr gawk zsh fonts-powerline \
     pkg-config libpixman-1-dev libcairo2-dev libpango1.0-dev libjpeg-dev \
     libgif-dev librsvg2-dev ffmpeg unzip jq htmlq mpv libnss3-tools \
     imagemagick ghostscript mkcert fzf ripgrep bat inotify-tools \
@@ -283,15 +281,43 @@ install_core_packages_mandatory() {
     libssl-dev zlib1g-dev libbz2-dev libreadline-dev libxmlsec1-dev \
     libffi-dev liblzma-dev libyaml-dev
 
-  # On Ubuntu, bat binary may be batcat
   if ! need_cmd bat && need_cmd batcat; then
     mkdir -p "$HOME/.local/bin"
     ln -sf "$(command -v batcat)" "$HOME/.local/bin/bat"
   fi
 }
 
+############################################
+# Optional install steps
+############################################
+ensure_snapd() {
+  if need_cmd snap; then return 0; fi
+  log "Installing snapd (required for Snap installs)"
+  apt_install snapd
+  sudo systemctl enable --now snapd.socket >/dev/null 2>&1 || true
+}
+
+snap_install_classic() {
+  local name="$1"
+  if snap list "$name" >/dev/null 2>&1; then
+    log "Snap already installed: $name"
+  else
+    log "Installing Snap: $name (classic)"
+    sudo snap install "$name" --classic
+  fi
+}
+
+snap_install() {
+  local name="$1"
+  if snap list "$name" >/dev/null 2>&1; then
+    log "Snap already installed: $name"
+  else
+    log "Installing Snap: $name"
+    sudo snap install "$name"
+  fi
+}
+
 install_zsh_stack() {
-  # zsh is part of mandatory core packages; do not reinstall here.
   setup_managed_env
 
   if [[ "${SHELL:-}" != "$(command -v zsh)" ]]; then
@@ -366,14 +392,7 @@ install_node() {
     return 0
   fi
 
-  ensure_keyrings_dir
-  curl -fsSL "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key" \
-    | sudo gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-
-  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
-    | sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null
-
-  apt_update
+  ensure_nodesource_repo
   apt_install nodejs
 
   if need_cmd corepack; then
@@ -429,9 +448,7 @@ create_vector_extension() {
 }
 
 install_db_stack_full() {
-  # Full DB stack: Postgres 17 + PostGIS + pgvector + extension
   ensure_pgdg_repo
-  apt_update
   apt_install postgresql-17 postgresql-client-17 postgresql-17-postgis-3 postgresql-server-dev-17
   install_pgvector_from_source
   create_vector_extension
@@ -468,9 +485,9 @@ install_obsidian_snap() {
 }
 
 ############################################
-# Menu
+# Main flow: confirm versions -> yes/no -> install
 ############################################
-print_menu() {
+print_defaults() {
   cat <<EOF
 Ubuntu Dev Bootstrap - installer.sh (Ubuntu 24.04 LTS)
 
@@ -483,37 +500,20 @@ Defaults (override via env or prompted):
   pgvector ver:   ${PGVECTOR_VERSION}
   Ollama model:   ${OLLAMA_PULL_MODEL}
 
-Mandatory:
-  - Core apt packages are installed automatically at startup.
-
-Select items (comma-separated) or 'all':
-
-  2) Zsh + Oh My Zsh (non-destructive)
-  3) asdf + Ruby (Rails)
-  4) asdf + Erlang + Elixir + Phoenix
-  5) Node.js (NodeSource)
-  6) Go (upstream tarball)
-  7) Full DB stack: Postgres 17 + PostGIS + pgvector + extension
-  8) VS Code (Snap --classic)
-  9) Obsidian (Snap)
- 10) Ollama
- 11) Pull Ollama model
- 12) Rust (rustup)
+Core packages:
+  - Installed automatically before optional components.
 
 EOF
 }
 
 main() {
-  is_ubuntu || die "This installer targets Ubuntu."
-  is_ubuntu_24 || die "This repository targets Ubuntu 24.04 LTS specifically (VERSION_ID=24.04)."
-
   sudo_keepalive
   setup_managed_env
 
-  # Mandatory core packages (run before any other selections)
   install_core_packages_mandatory
 
-  # Version prompts (interactive only)
+  print_defaults
+
   if [[ "$NONINTERACTIVE" != "1" ]]; then
     NODE_MAJOR="$(ask_line "Node major to install" "$NODE_MAJOR")"
     GO_VERSION="$(ask_line "Go version to install" "$GO_VERSION")"
@@ -524,28 +524,35 @@ main() {
     OLLAMA_PULL_MODEL="$(ask_line "Ollama model to pull (empty to skip)" "$OLLAMA_PULL_MODEL")"
   fi
 
-  local selection
-  if [[ "$NONINTERACTIVE" == "1" ]]; then
-    selection="$(normalize_selection "$DEFAULT_SELECT")"
-    [[ -n "$selection" ]] || die "NONINTERACTIVE=1 requires DEFAULT_SELECT (e.g. all or 2,3,7)"
-  else
-    print_menu
-    selection="$(ask_line "Enter selection" "")"
-    selection="$(normalize_selection "$selection")"
-    [[ -n "$selection" ]] || die "No selection provided."
+  local DO_ZSH DO_RUBY DO_BEAM DO_NODE DO_GO DO_DB DO_VSCODE DO_OBSIDIAN DO_OLLAMA DO_PULL_MODEL DO_RUST
+
+  DO_ZSH="$(ask_yn "Install Zsh + Oh My Zsh (non-destructive)?" "Y")"
+  DO_RUBY="$(ask_yn "Install Ruby via asdf (Bundler + Rails)?" "Y")"
+  DO_BEAM="$(ask_yn "Install Erlang + Elixir + Phoenix via asdf?" "Y")"
+  DO_NODE="$(ask_yn "Install Node.js via NodeSource?" "Y")"
+  DO_GO="$(ask_yn "Install Go to /usr/local/go?" "Y")"
+  DO_RUST="$(ask_yn "Install Rust via rustup?" "Y")"
+  DO_DB="$(ask_yn "Install full DB stack (Postgres 17 + PostGIS + pgvector)?" "Y")"
+  DO_VSCODE="$(ask_yn "Install VS Code via Snap (--classic)?" "Y")"
+  DO_OBSIDIAN="$(ask_yn "Install Obsidian via Snap?" "Y")"
+  DO_OLLAMA="$(ask_yn "Install Ollama?" "Y")"
+  DO_PULL_MODEL="$(ask_yn "Pull Ollama model (${OLLAMA_PULL_MODEL:-<none>})?" "Y")"
+
+  if [[ "$DO_OLLAMA" != "Y" ]]; then
+    DO_PULL_MODEL="N"
   fi
 
-  has_choice "$selection" 2  && install_zsh_stack
-  has_choice "$selection" 3  && install_ruby_asdf
-  has_choice "$selection" 4  && install_beam_and_phoenix
-  has_choice "$selection" 5  && install_node
-  has_choice "$selection" 6  && install_go
-  has_choice "$selection" 7  && install_db_stack_full
-  has_choice "$selection" 8  && install_vscode_snap
-  has_choice "$selection" 9  && install_obsidian_snap
-  has_choice "$selection" 10 && install_ollama
-  has_choice "$selection" 11 && pull_ollama_model
-  has_choice "$selection" 12 && install_rust
+  [[ "$DO_ZSH" == "Y" ]] && install_zsh_stack
+  [[ "$DO_RUBY" == "Y" ]] && install_ruby_asdf
+  [[ "$DO_BEAM" == "Y" ]] && install_beam_and_phoenix
+  [[ "$DO_NODE" == "Y" ]] && install_node
+  [[ "$DO_GO" == "Y" ]] && install_go
+  [[ "$DO_RUST" == "Y" ]] && install_rust
+  [[ "$DO_DB" == "Y" ]] && install_db_stack_full
+  [[ "$DO_VSCODE" == "Y" ]] && install_vscode_snap
+  [[ "$DO_OBSIDIAN" == "Y" ]] && install_obsidian_snap
+  [[ "$DO_OLLAMA" == "Y" ]] && install_ollama
+  [[ "$DO_PULL_MODEL" == "Y" ]] && pull_ollama_model
 
   log "Complete."
   warn "Notes:"
