@@ -1,6 +1,6 @@
 # Ubuntu Dev Bootstrap
 
-Interactive installer for **Ubuntu 24.04 LTS** that sets up a complete development environment with common system tooling, language runtimes, and a modern PostgreSQL/PostGIS/pgvector database stack.
+Interactive installer for **Ubuntu 24.04 LTS** that sets up a complete development environment with common system tooling, language runtimes, and a modern PostgreSQL/PostGIS/pgvector database stack. The installer is safe to run on a fresh Ubuntu 24.04 system and bootstraps required tools (including curl) automatically.
 
 **Repository:** https://github.com/ewanbeckett/ubuntu-dev-bootstrap  
 **Installer:** `installer.sh`  
@@ -16,6 +16,22 @@ Interactive installer for **Ubuntu 24.04 LTS** that sets up a complete developme
 ---
 
 ## Quick Start
+
+Start install directly from terminal:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/ewanbeckett/ubuntu-dev-bootstrap/main/installer.sh | bash
+```
+
+Download first and inspect before running (recommended for anything that uses sudo):
+
+```bash
+wget https://raw.githubusercontent.com/ewanbeckett/ubuntu-dev-bootstrap/main/installer.sh
+chmod +x installer.sh
+./installer.sh
+```
+
+Clone (if git is already installed):
 
 ```bash
 git clone https://github.com/ewanbeckett/ubuntu-dev-bootstrap.git
