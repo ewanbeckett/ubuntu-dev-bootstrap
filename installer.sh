@@ -315,7 +315,7 @@ snap_install_classic() {
     log "Snap already installed: $name"
   else
     log "Installing Snap: $name (classic)"
-    sudo snap install "$name" --classic
+    sudo snap install "$name" --classic || { warn "Snap install failed: $name"; return 0; }
   fi
 }
 
@@ -325,7 +325,7 @@ snap_install() {
     log "Snap already installed: $name"
   else
     log "Installing Snap: $name"
-    sudo snap install "$name"
+    sudo snap install "$name" || { warn "Snap install failed: $name"; return 0; }
   fi
 }
 
@@ -551,7 +551,7 @@ install_vscode_snap() {
 
 install_obsidian_snap() {
   ensure_snapd
-  snap_install obsidian
+  snap_install_classic obsidian
 }
 
 ############################################
