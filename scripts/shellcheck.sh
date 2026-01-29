@@ -6,4 +6,7 @@ if ! command -v shellcheck >/dev/null 2>&1; then
   exit 1
 fi
 
-shellcheck installer.sh
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+installer_path="$script_dir/../installer.sh"
+
+shellcheck "$installer_path"
