@@ -23,12 +23,14 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   gnupg \
   lsb-release
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 ############################################
 # Defaults (override via env or prompts)
 ############################################
 : "${NONINTERACTIVE:=0}"
 
-: "${DEFAULT_NODE_MAJOR:=22}"
+: "${DEFAULT_NODE_MAJOR:=24}"
 : "${NODE_MAJOR:=${NODE_MAJOR:-$DEFAULT_NODE_MAJOR}}"
 
 : "${DEFAULT_GO_VERSION:=1.25.6}"
@@ -36,6 +38,9 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 
 : "${DEFAULT_RUBY_VERSION:=4.0.1}"
 : "${RUBY_VERSION:=${RUBY_VERSION:-$DEFAULT_RUBY_VERSION}}"
+
+: "${DEFAULT_PYTHON_VERSION:=3.12.9}"
+: "${PYTHON_VERSION:=${PYTHON_VERSION:-$DEFAULT_PYTHON_VERSION}}"
 
 : "${DEFAULT_ERLANG_VERSION:=28.3}"
 : "${ERLANG_VERSION:=${ERLANG_VERSION:-$DEFAULT_ERLANG_VERSION}}"
@@ -50,6 +55,9 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 : "${OLLAMA_PULL_MODEL:=${OLLAMA_PULL_MODEL:-$DEFAULT_OLLAMA_PULL_MODEL}}"  # empty to skip
 
 : "${PY_VENV_DIR:=$HOME/.venvs/agents}"
+: "${PY_AGENT_CONSTRAINTS:=${SCRIPT_DIR}/constraints.txt}"
+: "${GIT_NAME:=${GIT_NAME:-}}"
+: "${GIT_EMAIL:=${GIT_EMAIL:-}}"
 
 ############################################
 # Logging
@@ -57,6 +65,13 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 log()  { printf "\033[1;34m[+] %s\033[0m\n" "$*"; }
 warn() { printf "\033[1;33m[!] %s\033[0m\n" "$*"; }
 die()  { printf "\033[1;31m[x] %s\033[0m\n" "$*"; exit 1; }
+
+BEST_EFFORT_FAILURES=()
+
+record_best_effort_failure() {
+  local msg="$1"
+  BEST_EFFORT_FAILURES+=("$msg")
+}
 
 on_err() {
   local ec=$?
@@ -70,6 +85,7 @@ trap 'on_err $LINENO' ERR
 ############################################
 # OS enforcement
 ############################################
+# shellcheck disable=SC1091
 . /etc/os-release
 [[ "${ID:-}" == "ubuntu" && "${VERSION_ID:-}" == "24.04" ]] || die "This installer targets Ubuntu 24.04 LTS only."
 
@@ -159,6 +175,26 @@ arch_asdf() {
   esac
 }
 
+pgvector_control_version() {
+  if ! need_cmd pg_config; then
+    return 0
+  fi
+  local sharedir file
+  sharedir="$(pg_config --sharedir 2>/dev/null || true)"
+  file="${sharedir}/extension/vector.control"
+  if [[ -f "$file" ]]; then
+    awk -F"'" '/^default_version/ {print $2; exit}' "$file"
+  fi
+}
+
+pgvector_db_version() {
+  if ! need_cmd psql; then
+    return 0
+  fi
+  sudo -u postgres psql -tAc "SELECT extversion FROM pg_extension WHERE extname='vector'" 2>/dev/null \
+    | tr -d '[:space:]'
+}
+
 
 ############################################
 # Prompts
@@ -171,7 +207,15 @@ ask_line() {
     return 0
   fi
   local ans=""
-  read -r -p "${prompt} [default: ${def}] " ans
+  if [[ -r /dev/tty ]]; then
+    if ! read -r -p "${prompt} [default: ${def}] " ans </dev/tty; then
+      echo "$def"
+      return 0
+    fi
+  else
+    echo "$def"
+    return 0
+  fi
   echo "${ans:-$def}"
 }
 
@@ -192,7 +236,15 @@ ask_yn() {
   fi
 
   local ans=""
-  read -r -p "${prompt}${suffix}" ans
+  if [[ -r /dev/tty ]]; then
+    if ! read -r -p "${prompt}${suffix}" ans </dev/tty; then
+      echo "$def"
+      return 0
+    fi
+  else
+    echo "$def"
+    return 0
+  fi
   ans="${ans:-$def}"
   case "$ans" in
     Y|y) echo "Y" ;;
@@ -235,7 +287,11 @@ ensure_pgdg_repo() {
 
 ensure_nodesource_repo() {
   if [[ -f /etc/apt/sources.list.d/nodesource.list ]]; then
-    return 0
+    if grep -q "node_${NODE_MAJOR}.x" /etc/apt/sources.list.d/nodesource.list; then
+      return 0
+    fi
+    log "Updating NodeSource apt repository to Node ${NODE_MAJOR}.x"
+    sudo rm -f /etc/apt/sources.list.d/nodesource.list
   fi
   ensure_keyrings_dir
   log "Adding NodeSource apt repository (Node ${NODE_MAJOR}.x)"
@@ -267,8 +323,11 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
 export AI_FORGE_VENV="${AI_FORGE_VENV:-$HOME/.venvs/agents}"
 EOF
 
+  # shellcheck disable=SC2016
   append_once '[[ -f "$HOME/.config/ai-forge/env.zsh" ]] && source "$HOME/.config/ai-forge/env.zsh"' "$HOME/.zshrc"
+  # shellcheck disable=SC2016
   append_once '[ -f "$HOME/.config/ai-forge/env.sh" ] && . "$HOME/.config/ai-forge/env.sh"' "$HOME/.bashrc"
+  # shellcheck disable=SC2016
   append_once '[ -f "$HOME/.config/ai-forge/env.sh" ] && . "$HOME/.config/ai-forge/env.sh"' "$HOME/.profile"
 }
 
@@ -302,6 +361,38 @@ install_core_packages_mandatory() {
   fi
 }
 
+configure_git_identity() {
+  if ! need_cmd git; then
+    return 0
+  fi
+
+  local existing_name existing_email
+  existing_name="$(git config --global user.name 2>/dev/null || true)"
+  existing_email="$(git config --global user.email 2>/dev/null || true)"
+
+  if [[ -n "$existing_name" || -n "$existing_email" ]]; then
+    log "Git identity already set (user.name/user.email); skipping."
+    return 0
+  fi
+
+  local name email
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    name="${GIT_NAME:-}"
+    email="${GIT_EMAIL:-}"
+  else
+    name="$(ask_line "Git user.name (leave blank to skip)" "${GIT_NAME:-}")"
+    email="$(ask_line "Git user.email (leave blank to skip)" "${GIT_EMAIL:-}")"
+  fi
+
+  if [[ -z "${name:-}" || -z "${email:-}" ]]; then
+    warn "Git identity not set (missing name/email)."
+    return 0
+  fi
+
+  git config --global user.name "$name"
+  git config --global user.email "$email"
+  log "Git identity configured."
+}
 ############################################
 # Optional install steps
 ############################################
@@ -395,7 +486,7 @@ asdf_source() {
 
   local v
   v="$(asdf --version 2>/dev/null || true)"
-  if [[ "$v" != v0.* ]]; then
+  if [[ "$v" != v0.* && "$v" != "asdf version v0."* ]]; then
     warn "Unexpected asdf version output: $v"
   fi
 }
@@ -438,8 +529,14 @@ install_beam_and_phoenix() {
 
 install_node() {
   if need_cmd node; then
-    log "Node already installed: $(node -v)"
-    return 0
+    local v major
+    v="$(node -v 2>/dev/null || true)"
+    major="$(printf "%s" "$v" | sed -E 's/^v([0-9]+).*/\1/')"
+    if [[ -n "$major" && "$major" == "$NODE_MAJOR" ]]; then
+      log "Node already installed: ${v}"
+      return 0
+    fi
+    warn "Node ${v} installed, but Node ${NODE_MAJOR}.x requested; upgrading."
   fi
 
   ensure_nodesource_repo
@@ -454,6 +551,14 @@ install_node() {
 
 install_go() {
   local arch tmp tarball
+  if [[ -x /usr/local/go/bin/go ]]; then
+    local have_ver
+    have_ver="$(/usr/local/go/bin/go version 2>/dev/null | awk '{print $3}' | sed 's/^go//')"
+    if [[ "$have_ver" == "$GO_VERSION" ]]; then
+      log "Go already installed: ${have_ver}"
+      return 0
+    fi
+  fi
   arch="$(arch_go)"
   log "Installing Go ${GO_VERSION} for ${arch}"
   tmp="$(mktemp -d)"
@@ -465,7 +570,9 @@ install_go() {
   rm -rf "$tmp"
 
   setup_managed_env
+  # shellcheck disable=SC2016
   append_once 'export PATH="/usr/local/go/bin:$PATH"' "$HOME/.config/ai-forge/env.zsh"
+  # shellcheck disable=SC2016
   append_once 'export PATH="/usr/local/go/bin:$PATH"' "$HOME/.config/ai-forge/env.sh"
 }
 
@@ -479,13 +586,13 @@ install_rust() {
 
   # Make cargo available in the current session
   if [[ -f "$HOME/.cargo/env" ]]; then
-    # shellcheck disable=SC1090
+    # shellcheck disable=SC1091
     . "$HOME/.cargo/env"
   fi
 }
 
 install_htmlq() {
-  if need_cmd; then
+  if need_cmd htmlq; then
     log "htmlq already installed: $(htmlq --version 2>/dev/null || true)"
     return 0
   fi
@@ -494,20 +601,46 @@ install_htmlq() {
     die "htmlq requires Rust (cargo). Please install Rust (rustup) first."
   fi
 
-  log "Installing via cargo"
-  cargo install
+  log "Installing htmlq via cargo"
+  if cargo install htmlq --locked; then
+    :
+  else
+    warn "htmlq install failed."
+    record_best_effort_failure "htmlq install failed"
+  fi
 }
 
 
 
 install_pgvector_from_source() {
+  local have_ver
+  have_ver="$(pgvector_control_version || true)"
+  if [[ -n "$have_ver" && "$have_ver" == "$PGVECTOR_VERSION" ]]; then
+    log "pgvector ${PGVECTOR_VERSION} already installed (extension files)"
+    return 0
+  fi
+  # Ensure build deps for pgvector (best effort).
+  apt_install_best_effort postgresql-server-dev-17 build-essential
   log "Installing pgvector v${PGVECTOR_VERSION} from source"
   cd /tmp
   rm -rf pgvector
-  git clone --branch "v${PGVECTOR_VERSION}" https://github.com/pgvector/pgvector.git
+  if ! git clone --branch "v${PGVECTOR_VERSION}" https://github.com/pgvector/pgvector.git; then
+    warn "pgvector clone failed; skipping."
+    record_best_effort_failure "pgvector clone failed"
+    cd ~
+    return 0
+  fi
   cd pgvector
-  make
-  sudo make install
+  if ! make; then
+    warn "pgvector build failed; skipping."
+    record_best_effort_failure "pgvector build failed"
+    cd ~
+    return 0
+  fi
+  if ! sudo make install; then
+    warn "pgvector install failed; skipping."
+    record_best_effort_failure "pgvector install failed"
+  fi
   cd ~
 }
 
@@ -516,8 +649,29 @@ create_vector_extension() {
     warn "psql not found; Postgres may not be installed."
     return 0
   fi
+  local db_ver
+  db_ver="$(pgvector_db_version || true)"
+  if [[ -n "$db_ver" ]]; then
+    if [[ "$db_ver" == "$PGVECTOR_VERSION" ]]; then
+      log "pgvector extension already present in DB (version ${db_ver})"
+      return 0
+    fi
+    log "Updating pgvector extension from ${db_ver} to ${PGVECTOR_VERSION} (best effort)"
+    if sudo -u postgres psql -c "ALTER EXTENSION vector UPDATE TO '${PGVECTOR_VERSION}';"; then
+      :
+    else
+      warn "pgvector extension update failed; verify extension files and retry."
+      record_best_effort_failure "pgvector extension update failed"
+    fi
+    return 0
+  fi
   log "Creating pgvector extension (best effort)"
-  sudo -u postgres psql -c "CREATE EXTENSION IF NOT EXISTS vector;" || true
+  if sudo -u postgres psql -c "CREATE EXTENSION IF NOT EXISTS vector;"; then
+    :
+  else
+    warn "pgvector extension create failed."
+    record_best_effort_failure "pgvector extension create failed"
+  fi
 }
 
 install_db_stack_full() {
@@ -537,13 +691,25 @@ install_ollama() {
 
 pull_ollama_model() {
   [[ -n "${OLLAMA_PULL_MODEL}" ]] || { warn "OLLAMA_PULL_MODEL is empty; skipping pull"; return 0; }
+  if need_cmd ollama; then
+    if ollama list 2>/dev/null \
+      | awk -v m="${OLLAMA_PULL_MODEL}" '{ if ($1==m || index($1, m ":")==1) {found=1} } END { exit !found }'; then
+      log "Ollama model already present: ${OLLAMA_PULL_MODEL}"
+      return 0
+    fi
+  fi
   local started=0 pid=""
   if ! pgrep -x ollama >/dev/null 2>&1; then
     ollama serve >/dev/null 2>&1 & pid=$!
     started=1
     sleep 2
   fi
-  ollama pull "${OLLAMA_PULL_MODEL}" || warn "Model pull failed; retry later: ollama pull ${OLLAMA_PULL_MODEL}"
+  if ollama pull "${OLLAMA_PULL_MODEL}"; then
+    :
+  else
+    warn "Model pull failed; retry later: ollama pull ${OLLAMA_PULL_MODEL}"
+    record_best_effort_failure "ollama pull failed: ${OLLAMA_PULL_MODEL}"
+  fi
   if [[ "$started" == "1" ]]; then kill "$pid" 2>/dev/null || true; fi
 }
 
@@ -568,6 +734,7 @@ Defaults (override via env or prompted):
   Node major:     ${NODE_MAJOR}
   Go version:     ${GO_VERSION}
   Ruby version:   ${RUBY_VERSION}
+  Python version: ${PYTHON_VERSION}
   Erlang version: ${ERLANG_VERSION}
   Elixir version: ${ELIXIR_VERSION}
   pgvector ver:   ${PGVECTOR_VERSION}
@@ -617,10 +784,16 @@ install_python_asdf() {
   install_asdf
   asdf_source
 
+  apt_install tcl-dev tk-dev
+
   asdf plugin add python >/dev/null 2>&1 || true
 
   local py_ver
-  py_ver="$(latest_python_stable || true)"
+  if [[ -n "${PYTHON_VERSION:-}" ]]; then
+    py_ver="${PYTHON_VERSION}"
+  else
+    py_ver="$(latest_python_stable || true)"
+  fi
   if [[ -z "${py_ver}" ]]; then
     warn "Could not determine latest Python version from asdf. Skipping Python install."
     return 0
@@ -641,12 +814,30 @@ install_python_asdf() {
 install_python_agent_libs() {
   install_uv
 
-  local py_bin=""
-  if need_cmd python; then
-    py_bin="$(command -v python)"
+  if ! need_cmd python; then
+    warn "python not found; skipping Python agent tooling."
+    return 0
+  fi
+
+  local constraints_arg=()
+  if [[ -n "${PY_AGENT_CONSTRAINTS:-}" && -f "${PY_AGENT_CONSTRAINTS}" ]]; then
+    constraints_arg=(-c "$PY_AGENT_CONSTRAINTS")
+  else
+    warn "Python constraints file not found; installing without constraints."
   fi
 
   mkdir -p "$(dirname "$PY_VENV_DIR")"
+  if [[ -d "$PY_VENV_DIR" ]]; then
+    local venv_py_ver=""
+    if [[ -x "$PY_VENV_DIR/bin/python" ]]; then
+      venv_py_ver="$("$PY_VENV_DIR/bin/python" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null || true)"
+    fi
+    if [[ -n "${PYTHON_VERSION:-}" && "$venv_py_ver" != "$PYTHON_VERSION" ]]; then
+      warn "Agent venv uses Python ${venv_py_ver:-unknown}, expected ${PYTHON_VERSION}; recreating."
+      rm -rf "$PY_VENV_DIR"
+    fi
+  fi
+
   if [[ ! -d "$PY_VENV_DIR" ]]; then
     log "Creating agent venv: $PY_VENV_DIR"
     uv venv "$PY_VENV_DIR"
@@ -654,10 +845,24 @@ install_python_agent_libs() {
     log "Agent venv already exists: $PY_VENV_DIR"
   fi
 
-  log "Installing Python agent tooling into venv (uv pip)"
-  uv pip install --python "$PY_VENV_DIR/bin/python" \
-    langchain-openai llama-index crewai autogen aider-chat playwright \
-    beautifulsoup4 duckduckgo-search
+  log "Installing Python agent tooling into venv (uv pip, best effort)"
+  local pkgs=(
+    langchain-openai
+    llama-index
+    autogen
+    playwright
+    beautifulsoup4
+    duckduckgo-search
+  )
+  local p
+  for p in "${pkgs[@]}"; do
+    if uv pip install --python "$PY_VENV_DIR/bin/python" "${constraints_arg[@]}" "$p"; then
+      :
+    else
+      warn "Python package install failed: $p"
+      record_best_effort_failure "python package install failed: $p"
+    fi
+  done
 }
 
 install_node_agent_tooling() {
@@ -667,21 +872,46 @@ install_node_agent_tooling() {
     return 0
   fi
 
+  # For native deps (e.g., PAM bindings used by some CLIs)
+  apt_install libpam0g-dev
+
   log "Installing global Node agent CLIs (best effort)"
   # Use npm -g for compatibility; corepack/pnpm remains available.
-  sudo npm install -g \
-    moltbot@latest \
-    molthub@latest \
-    @google/gemini-cli@latest \
-    @steipete/bird@latest \
-    vibetunnel@latest \
-    markdansi sweetlink mcporter tokentally sweet-cookie \
-    axios cheerio lodash express nodemon shiki \
-    || warn "One or more global npm installs failed."
+  local pkgs=(
+    moltbot@latest
+    molthub@latest
+    @google/gemini-cli@latest
+    @steipete/bird@latest
+    markdansi
+    sweetlink
+    mcporter
+    tokentally
+    sweet-cookie
+    axios
+    cheerio
+    lodash
+    express
+    nodemon
+    shiki
+  )
+  local p
+  for p in "${pkgs[@]}"; do
+    if sudo npm install -g "$p"; then
+      :
+    else
+      warn "npm global install failed: $p"
+      record_best_effort_failure "npm global install failed: $p"
+    fi
+  done
 
   # Playwright OS deps + browser install (best effort)
   log "Installing Playwright browsers + deps (best effort)"
-  npx -y playwright install --with-deps || warn "Playwright install/deps step failed."
+  if npx -y playwright install --with-deps; then
+    :
+  else
+    warn "Playwright install/deps step failed."
+    record_best_effort_failure "playwright install/deps failed"
+  fi
 }
 
 install_docker() {
@@ -732,6 +962,7 @@ install_wacli() {
     log "wacli already installed"
     return 0
   fi
+  export PATH="/usr/local/go/bin:$PATH"
   if ! need_cmd go; then
     warn "go not found; skipping wacli."
     return 0
@@ -746,6 +977,7 @@ install_gogcli() {
     log "gog already installed"
     return 0
   fi
+  export PATH="/usr/local/go/bin:$PATH"
   if ! need_cmd go; then
     warn "go not found; skipping gog."
     return 0
@@ -764,20 +996,9 @@ install_agent_tooling_bundle() {
   install_go
   install_rust
 
-  # via cargo (optional utility)
-  if need_cmd cargo; then
-    if ! need_cmd; then
-      log "Installing via cargo"
-      cargo install || warn "htmlq install failed."
-    else
-      log "htmlq already installed"
-    fi
-  else
-    warn "cargo not found; skipping."
-  fi
+  install_htmlq
 
   install_bun
-  install_python_asdf
   install_python_agent_libs
   install_node_agent_tooling
   install_wacli
@@ -801,50 +1022,108 @@ main() {
     NODE_MAJOR="$(ask_line "Node major to install" "$NODE_MAJOR")"
     GO_VERSION="$(ask_line "Go version to install" "$GO_VERSION")"
     RUBY_VERSION="$(ask_line "Ruby version (asdf) to install" "$RUBY_VERSION")"
+    PYTHON_VERSION="$(ask_line "Python version (asdf) to install" "$PYTHON_VERSION")"
     ERLANG_VERSION="$(ask_line "Erlang version (asdf) to install" "$ERLANG_VERSION")"
     ELIXIR_VERSION="$(ask_line "Elixir version (asdf) to install" "$ELIXIR_VERSION")"
     PGVECTOR_VERSION="$(ask_line "pgvector version to build" "$PGVECTOR_VERSION")"
     OLLAMA_PULL_MODEL="$(ask_line "Ollama model to pull (empty to skip)" "$OLLAMA_PULL_MODEL")"
   fi
 
-  local DO_ZSH DO_RUBY DO_BEAM DO_NODE DO_GO DO_DB DO_VSCODE DO_OBSIDIAN DO_OLLAMA DO_PULL_MODEL DO_RUST DO_HTMLQ DO_HTMLQ
+  local DO_ZSH DO_RUBY DO_PYTHON DO_BEAM DO_NODE DO_GO DO_DB DO_VSCODE DO_OBSIDIAN DO_OLLAMA DO_PULL_MODEL DO_RUST DO_HTMLQ DO_AGENT_TOOLING
 
-  DO_ZSH="$(ask_yn "Install Zsh + Oh My Zsh (non-destructive)?" "Y")"
-  DO_RUBY="$(ask_yn "Install Ruby via asdf (Bundler + Rails)?" "Y")"
-  DO_BEAM="$(ask_yn "Install Erlang + Elixir + Phoenix via asdf?" "Y")"
-  DO_NODE="$(ask_yn "Install Node.js via NodeSource?" "Y")"
-  DO_GO="$(ask_yn "Install Go to /usr/local/go?" "Y")"
-  DO_RUST="$(ask_yn "Install Rust via rustup?" "Y")"
-  DO_HTMLQ="$(ask_yn "Install (via cargo; requires Rust)?" "N")"
-  DO_HTMLQ="$(ask_yn "Install (requires Rust; installed via cargo)?" "N")"
-  DO_DB="$(ask_yn "Install full DB stack (Postgres 17 + PostGIS + pgvector)?" "Y")"
-  DO_VSCODE="$(ask_yn "Install VS Code via Snap (--classic)?" "Y")"
-  DO_OBSIDIAN="$(ask_yn "Install Obsidian via Snap?" "Y")"
-  DO_OLLAMA="$(ask_yn "Install Ollama?" "Y")"
-  DO_PULL_MODEL="$(ask_yn "Pull Ollama model (${OLLAMA_PULL_MODEL:-<none>})?" "Y")"
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    DO_ZSH="N"
+    DO_RUBY="N"
+    DO_PYTHON="N"
+    DO_BEAM="N"
+    DO_NODE="N"
+    DO_GO="N"
+    DO_RUST="N"
+    DO_HTMLQ="N"
+    DO_DB="N"
+    DO_VSCODE="N"
+    DO_OBSIDIAN="N"
+    DO_OLLAMA="N"
+    DO_PULL_MODEL="N"
+    DO_AGENT_TOOLING="N"
 
-  DO_AGENT_TOOLING="$(ask_yn "Install agent tooling bundle (Python/uv libs, Node AI CLIs incl. moltbot, Bun,, Playwright deps, Docker)?" "Y")"
+    if [[ "${DEFAULT_SELECT:-}" == "all" ]]; then
+      DO_ZSH="Y"
+      DO_RUBY="Y"
+      DO_PYTHON="Y"
+      DO_BEAM="Y"
+      DO_NODE="Y"
+      DO_GO="Y"
+      DO_RUST="Y"
+      DO_HTMLQ="Y"
+      DO_DB="Y"
+      DO_VSCODE="Y"
+      DO_OBSIDIAN="Y"
+      DO_OLLAMA="Y"
+      DO_PULL_MODEL="Y"
+      DO_AGENT_TOOLING="Y"
+    elif [[ -n "${DEFAULT_SELECT:-}" ]]; then
+      IFS=',' read -r -a _sel <<<"${DEFAULT_SELECT}"
+      for n in "${_sel[@]}"; do
+        case "${n// /}" in
+          1) DO_ZSH="Y" ;;
+          2) DO_RUBY="Y" ;;
+          3) DO_PYTHON="Y" ;;
+          4) DO_BEAM="Y" ;;
+          5) DO_NODE="Y" ;;
+          6) DO_GO="Y" ;;
+          7) DO_RUST="Y" ;;
+          8) DO_HTMLQ="Y" ;;
+          9) DO_DB="Y" ;;
+          10) DO_VSCODE="Y" ;;
+          11) DO_OBSIDIAN="Y" ;;
+          12) DO_OLLAMA="Y" ;;
+          13) DO_PULL_MODEL="Y" ;;
+          14) DO_AGENT_TOOLING="Y" ;;
+          *) warn "Unknown DEFAULT_SELECT entry: ${n}" ;;
+        esac
+      done
+    else
+      warn "NONINTERACTIVE=1 but DEFAULT_SELECT is not set; skipping optional installs."
+    fi
+  else
+    DO_ZSH="$(ask_yn "Install Zsh + Oh My Zsh (non-destructive)?" "Y")"
+    DO_RUBY="$(ask_yn "Install Ruby via asdf (Bundler + Rails)?" "Y")"
+    DO_PYTHON="$(ask_yn "Install Python via asdf?" "Y")"
+    DO_BEAM="$(ask_yn "Install Erlang + Elixir + Phoenix via asdf?" "Y")"
+    DO_NODE="$(ask_yn "Install Node.js via NodeSource?" "Y")"
+    DO_GO="$(ask_yn "Install Go to /usr/local/go?" "Y")"
+    DO_RUST="$(ask_yn "Install Rust via rustup?" "Y")"
+    DO_HTMLQ="$(ask_yn "Install htmlq (via cargo; requires Rust)?" "Y")"
+    DO_DB="$(ask_yn "Install full DB stack (Postgres 17 + PostGIS + pgvector)?" "Y")"
+    DO_VSCODE="$(ask_yn "Install VS Code via Snap (--classic)?" "Y")"
+    DO_OBSIDIAN="$(ask_yn "Install Obsidian via Snap?" "Y")"
+    DO_OLLAMA="$(ask_yn "Install Ollama?" "Y")"
+    DO_PULL_MODEL="$(ask_yn "Pull Ollama model (${OLLAMA_PULL_MODEL:-<none>})?" "Y")"
+    DO_AGENT_TOOLING="$(ask_yn "Install agent tooling bundle (Python/uv libs, Node AI CLIs incl. moltbot, Bun, Playwright deps, Docker, htmlq)?" "Y")"
+    DO_GIT_IDENTITY="$(ask_yn "Configure git user.name/user.email?" "Y")"
+  fi
 
   if [[ "$DO_HTMLQ" == "Y" ]]; then
     DO_RUST="Y"
+  fi
+
+  if [[ "$DO_AGENT_TOOLING" == "Y" ]]; then
+    DO_PYTHON="Y"
   fi
 
   if [[ "$DO_OLLAMA" != "Y" ]]; then
     DO_PULL_MODEL="N"
   fi
 
-  if [[ "${DO_HTMLQ:-N}" == "Y" ]]; then
-    DO_RUST="Y"
-  fi
-
   [[ "$DO_ZSH" == "Y" ]] && install_zsh_stack
   [[ "$DO_RUBY" == "Y" ]] && install_ruby_asdf
+  [[ "$DO_PYTHON" == "Y" ]] && install_python_asdf
   [[ "$DO_BEAM" == "Y" ]] && install_beam_and_phoenix
   [[ "$DO_NODE" == "Y" ]] && install_node
   [[ "$DO_GO" == "Y" ]] && install_go
   [[ "$DO_RUST" == "Y" ]] && install_rust
   [[ "$DO_HTMLQ" == "Y" ]] && install_htmlq
-  [[ "${DO_HTMLQ:-N}" == "Y" ]] && install_htmlq
   [[ "$DO_DB" == "Y" ]] && install_db_stack_full
   [[ "$DO_VSCODE" == "Y" ]] && install_vscode_snap
   [[ "$DO_OBSIDIAN" == "Y" ]] && install_obsidian_snap
@@ -852,8 +1131,16 @@ main() {
   [[ "$DO_PULL_MODEL" == "Y" ]] && pull_ollama_model
 
   [[ "$DO_AGENT_TOOLING" == "Y" ]] && install_agent_tooling_bundle
+  [[ "${DO_GIT_IDENTITY:-N}" == "Y" ]] && configure_git_identity
 
   log "Complete."
+  if (( ${#BEST_EFFORT_FAILURES[@]} > 0 )); then
+    warn "Best-effort step summary (some items failed):"
+    local item
+    for item in "${BEST_EFFORT_FAILURES[@]}"; do
+      warn "- ${item}"
+    done
+  fi
   warn "Notes:"
   warn "- If your login shell was changed to zsh: it applies next login."
   warn "- Managed env files:"
