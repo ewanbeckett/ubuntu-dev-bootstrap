@@ -314,14 +314,20 @@ setup_managed_env() {
 
   cat >"$zenv" <<'EOF'
 # ai-forge env (managed by installer)
-export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
+export ASDF_DATA_DIR="${ASDF_DATA_DIR:-$HOME/.asdf}"
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$ASDF_DATA_DIR/shims:$PATH"
 export AI_FORGE_VENV="${AI_FORGE_VENV:-$HOME/.venvs/agents}"
+unset -f asdf 2>/dev/null || true
 EOF
 
   cat >"$shenv" <<'EOF'
 # ai-forge env (managed by installer)
-export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
+export ASDF_DATA_DIR="${ASDF_DATA_DIR:-$HOME/.asdf}"
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$ASDF_DATA_DIR/shims:$PATH"
 export AI_FORGE_VENV="${AI_FORGE_VENV:-$HOME/.venvs/agents}"
+if [ -n "${BASH_VERSION:-}" ] || [ -n "${ZSH_VERSION:-}" ]; then
+  unset -f asdf 2>/dev/null || true
+fi
 EOF
 
   # shellcheck disable=SC2016
@@ -330,6 +336,41 @@ EOF
   append_once '[ -f "$HOME/.config/ai-forge/env.sh" ] && . "$HOME/.config/ai-forge/env.sh"' "$HOME/.bashrc"
   # shellcheck disable=SC2016
   append_once '[ -f "$HOME/.config/ai-forge/env.sh" ] && . "$HOME/.config/ai-forge/env.sh"' "$HOME/.profile"
+
+  warn_legacy_asdf_init
+}
+
+warn_legacy_asdf_init() {
+  if [[ -n "${WARNED_LEGACY_ASDF_INIT:-}" ]]; then
+    return 0
+  fi
+  WARNED_LEGACY_ASDF_INIT=1
+
+  local files=("$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile" "$HOME/.zprofile" "$HOME/.zshenv")
+  local found=()
+  local f
+  for f in "${files[@]}"; do
+    [[ -f "$f" ]] || continue
+    if grep -Eq 'asdf\.sh|/opt/asdf|\.asdf/asdf' "$f" 2>/dev/null; then
+      found+=("$f")
+    fi
+  done
+
+  if (( ${#found[@]} > 0 )); then
+    warn "Legacy asdf init detected in: ${found[*]}"
+    warn "Remove any lines that source ~/.asdf/asdf.sh to avoid the asdf 0.16+ upgrade notice."
+  fi
+}
+
+offer_shell_reexec() {
+  if [[ -n "${SKIP_SHELL_REEXEC:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    return 0
+  fi
+  log "Re-execing shell for updated environment..."
+  exec "${SHELL:-/bin/sh}" -l
 }
 
 ############################################
@@ -436,8 +477,34 @@ install_zsh_stack() {
     log "Installing Oh My Zsh (non-destructive)"
     RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c \
       "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+    if [[ ! -d "$HOME/.oh-my-zsh" ]]; then
+      warn "Oh My Zsh install did not create ~/.oh-my-zsh (check network or permissions)."
+    fi
   else
     log "Oh My Zsh already installed"
+  fi
+
+  configure_oh_my_zsh
+}
+
+configure_oh_my_zsh() {
+  local zshrc="$HOME/.zshrc"
+  if [[ ! -f "$zshrc" ]]; then
+    return 0
+  fi
+
+  if grep -q '^ZSH_THEME=' "$zshrc" 2>/dev/null; then
+    sed -i 's/^ZSH_THEME=.*/ZSH_THEME="ys"/' "$zshrc"
+  else
+    printf "\nZSH_THEME=\"ys\"\n" >>"$zshrc"
+  fi
+
+  if grep -q '^plugins=(' "$zshrc" 2>/dev/null; then
+    if ! grep -q '^plugins=.*asdf' "$zshrc" 2>/dev/null; then
+      sed -i 's/^plugins=(\(.*\))/plugins=(\1 asdf)/' "$zshrc"
+    fi
+  else
+    warn "No plugins=() line found in ~/.zshrc; add the asdf plugin manually if desired."
   fi
 }
 
@@ -1285,6 +1352,8 @@ main() {
 
   [[ "$DO_AGENT_TOOLING" == "Y" ]] && install_dev_ai_productivity_bundle
   [[ "${DO_GIT_IDENTITY:-N}" == "Y" ]] && configure_git_identity
+
+  offer_shell_reexec
 
   log "Complete."
   if (( ${#BEST_EFFORT_FAILURES[@]} > 0 )); then

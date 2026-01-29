@@ -138,6 +138,8 @@ Note: some Python tools (e.g., `crewai`, `aider-chat`) are intentionally exclude
 
 Note: the installer can optionally configure `git` user.name/user.email during the interactive flow.
 
+Note: asdf installs the Go-based binary (v0.16+) and manages shims via `~/.asdf`. If you see the legacy asdf upgrade notice on login, remove any manual `source ~/.asdf/asdf.sh` from your shell config and re-run the installer to refresh the managed env.
+
 ---
 
 ## Defaults
