@@ -73,9 +73,9 @@ Selectable component numbers:
 9. Full DB stack (Postgres 17 + PostGIS + pgvector)
 10. VS Code (Snap)
 11. Obsidian (Snap)
-12. Ollama
+12. Local model tooling (Ollama + llama.cpp)
 13. Pull Ollama model
-14. Agent tooling bundle
+14. Developer + AI productivity bundle
 
 Override versions:
 
@@ -110,7 +110,7 @@ Database packages and language runtimes are **not duplicated** here and are inst
 - Erlang + Elixir + Phoenix via asdf
 - Node.js via NodeSource (version selectable)
 - Go (installed to `/usr/local/go`, version selectable)
-- **Rust via rustup**
+- Rust via rustup
 - htmlq via cargo
 - Full database stack:
   - PostgreSQL 17
@@ -119,16 +119,20 @@ Database packages and language runtimes are **not duplicated** here and are inst
   - pgvector extension created automatically
 - VS Code (Snap `--classic`)
 - Obsidian (Snap)
-- Ollama + optional model pull
-- Agent tooling bundle:
+- Local model tooling:
+  - Ollama
+  - llama.cpp (CPU or GPU build, based on detection)
+  - Optional model pull
+- Developer + AI productivity bundle:
   - htmlq, Bun, uv
-  - Python tooling (venv + agent libs)
-  - Node AI CLIs (moltbot, molthub, gemini-cli, etc.)
+  - Python tooling (venv + agent libs; multi-provider SDKs)
+  - Node AI CLIs + SDKs (moltbot, molthub, gemini-cli, OpenAI/Anthropic/Groq SDKs)
   - Playwright deps + browsers
   - Docker
   - tidewave, wacli, gogcli
+  - Productivity CLIs (direnv, zoxide, tmux, fd, starship, pass, age, sops)
 
-Note: selecting the agent tooling bundle will also install Python via asdf if it is not already selected.
+Note: selecting the developer + AI productivity bundle will also install Python via asdf if it is not already selected.
 
 Note: some Python tools (e.g., `crewai`, `aider-chat`) are intentionally excluded due to current resolver conflicts in a single venv. They may be re-added when their dependency graphs become compatible.
 
@@ -151,6 +155,10 @@ Defaults are shown during installation and can be overridden.
 | Rust | latest stable (rustup) |
 | pgvector | 0.8.1 |
 | Ollama model | llama3 |
+
+Local model tooling notes:
+- llama.cpp build defaults to GPU if detected, otherwise prompts to skip or CPU-only.
+- Override with `LLAMA_CPP_MODE=cpu|cuda|rocm|skip` (non-interactive defaults to skip on CPU-only systems).
 
 ---
 

@@ -53,6 +53,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${DEFAULT_OLLAMA_PULL_MODEL:=llama3}"
 : "${OLLAMA_PULL_MODEL:=${OLLAMA_PULL_MODEL:-$DEFAULT_OLLAMA_PULL_MODEL}}"  # empty to skip
+: "${LLAMA_CPP_MODE:=${LLAMA_CPP_MODE:-auto}}" # auto|cpu|cuda|rocm|skip
 
 : "${PY_VENV_DIR:=$HOME/.venvs/agents}"
 : "${PY_AGENT_CONSTRAINTS:=${SCRIPT_DIR}/constraints.txt}"
@@ -344,7 +345,7 @@ install_core_packages_mandatory() {
 
   # Stage 0 already installed: ca-certificates curl wget gnupg lsb-release
   apt_install_best_effort \
-    git gh build-essential dirmngr gawk zsh fonts-powerline \
+    git gh build-essential dirmngr gawk zsh fonts-powerline pciutils \
     pkg-config libpixman-1-dev libcairo2-dev libpango1.0-dev libjpeg-dev \
     libgif-dev librsvg2-dev ffmpeg unzip jq mpv libnss3-tools \
     imagemagick ghostscript mkcert fzf ripgrep bat inotify-tools \
@@ -689,6 +690,128 @@ install_ollama() {
   fi
 }
 
+detect_llama_cpp_backend() {
+  # Prefer lspci if available (pciutils); fall back to device nodes and drivers.
+  if need_cmd lspci; then
+    if lspci 2>/dev/null | grep -qi 'NVIDIA'; then
+      echo "cuda"
+      return 0
+    fi
+    if lspci 2>/dev/null | grep -Eqi 'AMD|Advanced Micro Devices|ATI'; then
+      # Only treat as ROCm-capable if AMD GPU is present and kfd is available.
+      if [[ -e /dev/kfd ]]; then
+        echo "rocm"
+        return 0
+      fi
+    fi
+  fi
+
+  # Fallbacks when lspci is unavailable.
+  if need_cmd nvidia-smi || [[ -e /dev/nvidia0 ]] || [[ -f /proc/driver/nvidia/version ]]; then
+    echo "cuda"
+    return 0
+  fi
+
+  # Use sysfs vendor IDs to avoid false positives for ROCm.
+  if [[ -d /sys/class/drm ]]; then
+    if grep -rq "0x1002" /sys/class/drm/*/device/vendor 2>/dev/null; then
+      if [[ -e /dev/kfd ]]; then
+        echo "rocm"
+        return 0
+      fi
+    fi
+  fi
+  echo "none"
+}
+
+install_llama_cpp() {
+  local mode="${1:-cpu}"
+  if need_cmd llama-cli || need_cmd llama-server; then
+    log "llama.cpp already installed"
+    return 0
+  fi
+
+  apt_install_best_effort cmake
+
+  local cmake_flags=()
+  case "$mode" in
+    cuda) cmake_flags+=(-DGGML_CUDA=ON) ;;
+    rocm) cmake_flags+=(-DGGML_HIP=ON) ;;
+    cpu)  ;;
+    *) warn "Unknown llama.cpp mode: $mode; skipping."; return 0 ;;
+  esac
+
+  log "Installing llama.cpp (${mode} build, best effort)"
+  local tmp
+  tmp="$(mktemp -d)"
+  if ! git clone https://github.com/ggerganov/llama.cpp.git "$tmp/llama.cpp"; then
+    warn "llama.cpp clone failed; skipping."
+    record_best_effort_failure "llama.cpp clone failed"
+    return 0
+  fi
+
+  if cmake -S "$tmp/llama.cpp" -B "$tmp/llama.cpp/build" -DCMAKE_BUILD_TYPE=Release "${cmake_flags[@]}" \
+    && cmake --build "$tmp/llama.cpp/build" -j; then
+    mkdir -p "$HOME/.local/bin"
+    if compgen -G "$tmp/llama.cpp/build/bin/*" >/dev/null; then
+      cp -f "$tmp/llama.cpp/build/bin/"* "$HOME/.local/bin/" || true
+      log "llama.cpp binaries installed to ~/.local/bin"
+    else
+      warn "llama.cpp build did not produce bin artifacts; check build output."
+      record_best_effort_failure "llama.cpp build produced no bin artifacts"
+    fi
+  else
+    warn "llama.cpp build failed; skipping."
+    record_best_effort_failure "llama.cpp build failed"
+  fi
+
+  rm -rf "$tmp"
+}
+
+install_local_model_tooling() {
+  log "Installing local model tooling (Ollama + llama.cpp)"
+  install_ollama
+  local backend
+  backend="$(detect_llama_cpp_backend)"
+
+  if [[ "$LLAMA_CPP_MODE" == "skip" ]]; then
+    log "LLAMA_CPP_MODE=skip; skipping llama.cpp"
+    return 0
+  fi
+
+  if [[ "$LLAMA_CPP_MODE" == "cpu" || "$LLAMA_CPP_MODE" == "cuda" || "$LLAMA_CPP_MODE" == "rocm" ]]; then
+    install_llama_cpp "$LLAMA_CPP_MODE"
+    return 0
+  fi
+
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    if [[ "$backend" == "cuda" || "$backend" == "rocm" ]]; then
+      install_llama_cpp "$backend"
+    else
+      warn "No GPU detected; skipping llama.cpp in non-interactive mode (set LLAMA_CPP_MODE=cpu to force)."
+    fi
+    return 0
+  fi
+
+  if [[ "$backend" == "cuda" || "$backend" == "rocm" ]]; then
+    local ans
+    ans="$(ask_yn "GPU detected (${backend}). Build llama.cpp with GPU support?" "Y")"
+    if [[ "$ans" == "Y" ]]; then
+      install_llama_cpp "$backend"
+    else
+      warn "Skipping llama.cpp build."
+    fi
+  else
+    local ans
+    ans="$(ask_yn "No GPU detected. Build llama.cpp CPU-only (slower)?" "N")"
+    if [[ "$ans" == "Y" ]]; then
+      install_llama_cpp "cpu"
+    else
+      warn "Skipping llama.cpp build."
+    fi
+  fi
+}
+
 pull_ollama_model() {
   [[ -n "${OLLAMA_PULL_MODEL}" ]] || { warn "OLLAMA_PULL_MODEL is empty; skipping pull"; return 0; }
   if need_cmd ollama; then
@@ -847,9 +970,19 @@ install_python_agent_libs() {
 
   log "Installing Python agent tooling into venv (uv pip, best effort)"
   local pkgs=(
+    openai
+    anthropic
+    groq
+    litellm
     langchain-openai
     llama-index
     autogen
+    tiktoken
+    pydantic
+    tenacity
+    httpx
+    rich
+    python-dotenv
     playwright
     beautifulsoup4
     duckduckgo-search
@@ -882,6 +1015,9 @@ install_node_agent_tooling() {
     molthub@latest
     @google/gemini-cli@latest
     @steipete/bird@latest
+    openai@latest
+    @anthropic-ai/sdk@latest
+    groq-sdk@latest
     markdansi
     sweetlink
     mcporter
@@ -911,6 +1047,22 @@ install_node_agent_tooling() {
   else
     warn "Playwright install/deps step failed."
     record_best_effort_failure "playwright install/deps failed"
+  fi
+}
+
+install_productivity_tools() {
+  # Best-effort CLI tooling for developer + AI workflows.
+  apt_install_best_effort direnv zoxide tmux fd-find pass age sops
+
+  if ! need_cmd fd && need_cmd fdfind; then
+    mkdir -p "$HOME/.local/bin"
+    ln -sf "$(command -v fdfind)" "$HOME/.local/bin/fd"
+  fi
+
+  if ! need_cmd starship; then
+    log "Installing starship prompt (user-local)"
+    curl -fsSL https://starship.rs/install.sh | sh -s -- -y --bin-dir "$HOME/.local/bin" || \
+      warn "starship install failed."
   fi
 }
 
@@ -987,8 +1139,8 @@ install_gogcli() {
 }
 
 
-install_agent_tooling_bundle() {
-  log "🧰 Installing agent tooling bundle..."
+install_dev_ai_productivity_bundle() {
+  log "🧰 Installing developer + AI productivity bundle..."
 
   # Ensure prerequisites: Node and Rust are expected for this bundle.
   # Node is needed for moltbot + CLIs; Rust is needed for cargo-installed tools like.
@@ -998,6 +1150,7 @@ install_agent_tooling_bundle() {
 
   install_htmlq
 
+  install_productivity_tools
   install_bun
   install_python_agent_libs
   install_node_agent_tooling
@@ -1006,7 +1159,7 @@ install_agent_tooling_bundle() {
   install_docker
   install_tidewave
 
-  log "Agent tooling bundle complete."
+  log "Developer + AI productivity bundle complete."
 }
 
 
@@ -1098,9 +1251,9 @@ main() {
     DO_DB="$(ask_yn "Install full DB stack (Postgres 17 + PostGIS + pgvector)?" "Y")"
     DO_VSCODE="$(ask_yn "Install VS Code via Snap (--classic)?" "Y")"
     DO_OBSIDIAN="$(ask_yn "Install Obsidian via Snap?" "Y")"
-    DO_OLLAMA="$(ask_yn "Install Ollama?" "Y")"
+    DO_OLLAMA="$(ask_yn "Install local model tooling (Ollama + llama.cpp)?" "Y")"
     DO_PULL_MODEL="$(ask_yn "Pull Ollama model (${OLLAMA_PULL_MODEL:-<none>})?" "Y")"
-    DO_AGENT_TOOLING="$(ask_yn "Install agent tooling bundle (Python/uv libs, Node AI CLIs incl. moltbot, Bun, Playwright deps, Docker, htmlq)?" "Y")"
+    DO_AGENT_TOOLING="$(ask_yn "Install developer + AI productivity bundle (Python/uv libs, multi-provider SDKs/CLIs, Bun, Playwright deps, Docker, htmlq, dev QoL tools)?" "Y")"
     DO_GIT_IDENTITY="$(ask_yn "Configure git user.name/user.email?" "Y")"
   fi
 
@@ -1127,10 +1280,10 @@ main() {
   [[ "$DO_DB" == "Y" ]] && install_db_stack_full
   [[ "$DO_VSCODE" == "Y" ]] && install_vscode_snap
   [[ "$DO_OBSIDIAN" == "Y" ]] && install_obsidian_snap
-  [[ "$DO_OLLAMA" == "Y" ]] && install_ollama
+  [[ "$DO_OLLAMA" == "Y" ]] && install_local_model_tooling
   [[ "$DO_PULL_MODEL" == "Y" ]] && pull_ollama_model
 
-  [[ "$DO_AGENT_TOOLING" == "Y" ]] && install_agent_tooling_bundle
+  [[ "$DO_AGENT_TOOLING" == "Y" ]] && install_dev_ai_productivity_bundle
   [[ "${DO_GIT_IDENTITY:-N}" == "Y" ]] && configure_git_identity
 
   log "Complete."
