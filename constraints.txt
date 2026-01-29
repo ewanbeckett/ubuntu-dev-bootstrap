@@ -1,0 +1,8 @@
+# Python agent tooling constraints
+# Keep in sync with the package set in installer.sh.
+
+# Constraints for the main agent venv.
+# Constraints for the single agent venv.
+langchain-openai==0.0.6
+langchain-core==0.1.52
+packaging>=23.2,<24.0
