@@ -94,6 +94,9 @@ When adding new tools or languages:
   - Normalize or “modernize” versions implicitly
   - Drift documentation versions away from script defaults
 
+Python agent tooling pins are defined in `constraints.txt`.  
+If the installer and constraints disagree, the constraints file governs the Python agent tooling versions.
+
 Version prompts and environment overrides are preferred over hard changes.
 
 ---
