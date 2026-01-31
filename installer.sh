@@ -25,7 +25,11 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   build-essential \
   git
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${BASH_SOURCE:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
 
 ############################################
 # Defaults (override via env or prompts)
