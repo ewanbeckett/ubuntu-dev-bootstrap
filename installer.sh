@@ -21,7 +21,9 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   curl \
   wget \
   gnupg \
-  lsb-release
+  lsb-release \
+  build-essential \
+  git
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -386,7 +388,7 @@ install_core_packages_mandatory() {
 
   # Stage 0 already installed: ca-certificates curl wget gnupg lsb-release
   apt_install_best_effort \
-    git gh build-essential dirmngr gawk zsh fonts-powerline pciutils \
+    gh dirmngr gawk zsh fonts-powerline pciutils \
     pkg-config libpixman-1-dev libcairo2-dev libpango1.0-dev libjpeg-dev \
     libgif-dev librsvg2-dev ffmpeg unzip jq mpv libnss3-tools \
     imagemagick ghostscript mkcert fzf ripgrep bat inotify-tools \
